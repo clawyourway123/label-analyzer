@@ -10,12 +10,15 @@ Key improvements over POC:
 - Better error handling and logging
 - Structured output for downstream processing
 - Batch processing support
+- Disk-based response caching (avoids redundant API calls)
 """
 
 import os
 import json
 import base64
+import hashlib
 import logging
+import time
 from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import List, Optional, Dict, Tuple
@@ -223,17 +226,118 @@ BOUNDARY_REFINEMENT_SCHEMA = {
 
 
 # ============================================================================
+# RESPONSE CACHE
+# ============================================================================
+
+class ResponseCache:
+    """Disk-backed cache for API responses keyed by image content + prompt hash.
+
+    Eliminates redundant Gemini calls when re-analyzing the same image or when
+    the pipeline retries after a partial failure.  Cache entries are JSON files
+    stored under *cache_dir* with a configurable TTL (default 7 days).
+
+    The cache key is SHA-256(image_data_bytes + prompt + schema_json).
+    """
+
+    def __init__(self, cache_dir: Optional[str] = None, ttl_seconds: int = 7 * 86400):
+        self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "label_analyzer"
+        self.ttl_seconds = ttl_seconds
+        self._enabled = True
+        self.hits = 0
+        self.misses = 0
+
+    def enable(self):
+        self._enabled = True
+
+    def disable(self):
+        self._enabled = False
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_key(image_data: Dict, prompt: str, schema: Optional[Dict] = None) -> str:
+        """Deterministic SHA-256 key from image bytes + prompt + schema."""
+        h = hashlib.sha256()
+        # Hash the base64 image data (stable for same image)
+        inline = image_data.get("inline_data", {})
+        h.update(inline.get("data", "").encode("utf-8"))
+        h.update(prompt.encode("utf-8"))
+        if schema:
+            h.update(json.dumps(schema, sort_keys=True).encode("utf-8"))
+        return h.hexdigest()
+
+    def _path_for(self, key: str) -> Path:
+        return self.cache_dir / f"{key}.json"
+
+    # ------------------------------------------------------------------
+
+    def get(self, image_data: Dict, prompt: str, schema: Optional[Dict] = None) -> Optional[str]:
+        """Return cached response text, or None on miss / expired / disabled."""
+        if not self._enabled:
+            return None
+        key = self._make_key(image_data, prompt, schema)
+        path = self._path_for(key)
+        if not path.exists():
+            self.misses += 1
+            return None
+        try:
+            entry = json.loads(path.read_text())
+            if time.time() - entry.get("ts", 0) > self.ttl_seconds:
+                path.unlink(missing_ok=True)
+                self.misses += 1
+                return None
+            self.hits += 1
+            logger.debug(f"Cache HIT ({key[:12]}…)")
+            return entry["response"]
+        except Exception:
+            self.misses += 1
+            return None
+
+    def put(self, image_data: Dict, prompt: str, response_text: str,
+            schema: Optional[Dict] = None) -> None:
+        """Store a response in the cache."""
+        if not self._enabled:
+            return
+        key = self._make_key(image_data, prompt, schema)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": time.time(), "response": response_text}
+        self._path_for(key).write_text(json.dumps(entry))
+
+    def clear(self) -> int:
+        """Remove all cached entries. Returns count of files removed."""
+        if not self.cache_dir.exists():
+            return 0
+        removed = 0
+        for f in self.cache_dir.glob("*.json"):
+            f.unlink()
+            removed += 1
+        logger.info(f"Cache cleared: {removed} entries removed")
+        return removed
+
+    def stats(self) -> Dict:
+        """Return hit/miss statistics."""
+        total = self.hits + self.misses
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": self.hits / total if total else 0.0,
+        }
+
+
+# ============================================================================
 # GEMINI CLIENT WRAPPER
 # ============================================================================
 
 class GeminiClient:
     """Wrapper for Gemini API interactions"""
     
-    def __init__(self, project_id: str, model: str = "gemini-3-pro-preview", location: str = "global"):
+    def __init__(self, project_id: str, model: str = "gemini-3-pro-preview", location: str = "global",
+                 cache: Optional[ResponseCache] = None):
         self.project_id = project_id
         self.model = model
         self.location = location
         self._client = None
+        self.cache = cache or ResponseCache()
     
     def _get_client(self):
         """Lazy-load Gemini client"""
@@ -247,21 +351,32 @@ class GeminiClient:
         return self._client
     
     def analyze_image(self, image_data: Dict, prompt: str, response_schema: Optional[Dict] = None) -> str:
-        """Call Gemini with image and optional structured output"""
+        """Call Gemini with image and optional structured output.
+
+        Results are cached by (image_data, prompt, schema) so repeated
+        calls for the same input return instantly without an API round-trip.
+        """
+        # Check cache first
+        cached = self.cache.get(image_data, prompt, response_schema)
+        if cached is not None:
+            return cached
+
         client = self._get_client()
-        
+
         config = {}
         if response_schema:
             config["response_mime_type"] = "application/json"
             config["response_json_schema"] = response_schema
-        
+
         try:
             response = client.models.generate_content(
                 model=self.model,
                 contents=[prompt, image_data],
                 config=config if config else None
             )
-            return response.text
+            text = response.text
+            self.cache.put(image_data, prompt, text, response_schema)
+            return text
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             raise
@@ -274,8 +389,9 @@ class GeminiClient:
 class LabelAnalyzer:
     """Production-ready label analyzer with multi-stage detection"""
     
-    def __init__(self, project_id: str, dpi: int = 300):
-        self.gemini = GeminiClient(project_id)
+    def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None):
+        cache = ResponseCache(cache_dir=cache_dir)
+        self.gemini = GeminiClient(project_id, cache=cache)
         self.original_dpi = dpi
         self.calibration = CalibrationResult(dpi)
         self.detected_parts: List[DetectedPart] = []
