@@ -240,7 +240,11 @@ class DetectedPart:
         return self.confidence >= threshold
     
     def is_compliant(self) -> bool:
-        """Check if CLP region passes all compliance checks"""
+        """Check if CLP region passes all compliance checks.
+        
+        Only explicit "PASS" status counts as compliant.
+        "SKIP" (too uncertain), "UNCLEAR", and "FAIL" all return False.
+        """
         if not self.compliance_check:
             return False
         if self.classification != PartClassification.CLP:
@@ -248,10 +252,8 @@ class DetectedPart:
         
         # Check overall_compliance from rule_results
         status = self.compliance_check.get("overall_compliance", "")
-        # SKIP means unreadable region - neither pass nor fail
-        if status == "SKIP":
-            return False  # Unreadable regions don't pass
         
+        # Only explicit PASS wins; SKIP, UNCLEAR, FAIL all return False
         return status == "PASS"
     
     def needs_human_review(self, confidence_threshold: float = 0.85, margin_pct: float = 0.1) -> bool:
@@ -266,6 +268,11 @@ class DetectedPart:
         """
         if not self.compliance_check or self.classification != PartClassification.CLP:
             return False
+        
+        # Any SKIP status requires human review (measurements too uncertain)
+        overall_status = self.compliance_check.get("overall_compliance", "")
+        if overall_status == "SKIP":
+            return True
         
         # Low confidence measurements
         if self.compliance_check.get("measurement_confidence", 1.0) < confidence_threshold:
@@ -370,11 +377,13 @@ Task: Identify ALL distinct regions on this label, even if they overlap or have 
 For each region, provide:
 1. A clear classification (CLP or NON-CLP) based on CONTENT
 2. A descriptive label (e.g., "Hazard Symbols", "Ingredients List", "Usage Instructions")
-3. Approximate bounding rectangle
+3. Tight bounding box using Gemini's native box_2d format: [ymin, xmin, ymax, xmax] (normalized 0-1000)
+   - Make sure the bounding box is as tight as possible around the content
+   - Use 0-1000 scale (0=top/left, 1000=bottom/right)
 4. Your confidence level (0.0-1.0)
 
 Be exhaustive - we want to catch every distinct section, even small ones.
-Return as JSON with array of detected regions.
+Return just box_2d, label, classification, and confidence. No additional text.
 """
 
 ROUGH_DETECTION_SCHEMA = {
@@ -388,19 +397,16 @@ ROUGH_DETECTION_SCHEMA = {
                     "classification": {"type": "string", "enum": ["CLP", "NON-CLP"]},
                     "label": {"type": "string"},
                     "content_type": {"type": "string", "description": "Specific section type (e.g., 'Ingredients', 'Hazard Symbols', 'Usage Instructions')"},
-                    "rect": {
-                        "type": "object",
-                        "properties": {
-                            "xmin": {"type": "integer"},
-                            "ymin": {"type": "integer"},
-                            "xmax": {"type": "integer"},
-                            "ymax": {"type": "integer"}
-                        },
-                        "required": ["xmin", "ymin", "xmax", "ymax"]
+                    "box_2d": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "description": "[ymin, xmin, ymax, xmax] normalized 0-1000"
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1}
                 },
-                "required": ["classification", "label", "content_type", "rect", "confidence"]
+                "required": ["classification", "label", "content_type", "box_2d", "confidence"]
             }
         }
     },
@@ -417,27 +423,25 @@ You previously identified a region on this label as:
 - Classification: {classification}
 - Label: {label}
 - Content Type: {content_type}
-- Approximate bounding box: [{xmin}, {ymin}] to [{xmax}, {ymax}]
+- Approximate bounding box (0-1000 normalized): [ymin={ymin}, xmin={xmin}, ymax={ymax}, xmax={xmax}]
 
-Now, refine the boundaries by identifying the exact pixel coordinates that form the border of this region.
+Now, refine the boundaries by identifying the exact borders of this region.
+Make the bounding box as tight as possible around the content.
 If the region has an irregular shape, provide a polygon with corner points.
-Otherwise, provide the precise rectangular bounds.
+Otherwise, provide the precise rectangular bounds using box_2d format.
 
-Return the refined region as JSON.
+Return the refined region with tight bounds. Use box_2d=[ymin, xmin, ymax, xmax] normalized 0-1000.
 """
 
 BOUNDARY_REFINEMENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "refined_rect": {
-            "type": "object",
-            "properties": {
-                "xmin": {"type": "integer"},
-                "ymin": {"type": "integer"},
-                "xmax": {"type": "integer"},
-                "ymax": {"type": "integer"}
-            },
-            "required": ["xmin", "ymin", "xmax", "ymax"]
+        "refined_box_2d": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "[ymin, xmin, ymax, xmax] normalized 0-1000 for tight bounds"
         },
         "has_irregular_shape": {"type": "boolean"},
         "polygon_points": {
@@ -445,8 +449,8 @@ BOUNDARY_REFINEMENT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "x": {"type": "integer"},
-                    "y": {"type": "integer"}
+                    "x": {"type": "number", "description": "x coordinate 0-1000"},
+                    "y": {"type": "number", "description": "y coordinate 0-1000"}
                 }
             }
         },
@@ -462,9 +466,13 @@ BOUNDARY_REFINEMENT_SCHEMA = {
 def get_clp_validation_prompt(true_dpi: int, dpmm: float, package_size_ml: int = 500) -> str:
     """Generate CLP validation prompt that measures (not judges) compliance.
     
+    NOTE: This prompt is used with a CROPPED image of the CLP region.
+    Coordinates in the cropped image are in that crop's local coordinate space.
+    The DPI/DPMM values apply to this crop (inherited from original image).
+    
     Args:
-        true_dpi: Calibrated DPI
-        dpmm: Pixels per millimeter
+        true_dpi: Calibrated DPI (from original image)
+        dpmm: Pixels per millimeter (from original image)
         package_size_ml: Package size in ml (determines font size threshold)
     """
     return f"""
@@ -513,7 +521,40 @@ CLP_VALIDATION_SCHEMA = {
 }
 
 def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500) -> Dict:
-    """Apply CLP rules to measurements. 100% deterministic."""
+    """Apply CLP rules to measurements. 100% deterministic.
+    
+    Returns "SKIP" status when measurements are too uncertain to evaluate.
+    Only returns "PASS" or "FAIL" when measurement_confidence >= 0.5.
+    """
+    
+    # Check if measurements are too uncertain to evaluate
+    measurement_confidence = metrics.get("measurement_confidence", 0)
+    if measurement_confidence < 0.5:
+        logger.warning(f"  ⚠️  Measurement confidence too low ({measurement_confidence:.2f}), marking as SKIP")
+        return {
+            "rule_1_font_size": {
+                "status": "SKIP",
+                "detail": "Measurement confidence too low",
+                "threshold_mm": 0,
+                "measured_mm": metrics.get("font_size_mm", 0),
+                "pass": None
+            },
+            "rule_2_line_distance": {
+                "status": "SKIP",
+                "detail": "Measurement confidence too low",
+                "threshold_mm": 0,
+                "measured_mm": metrics.get("line_distance_mm", 0),
+                "pass": None
+            },
+            "rule_3_background_contrast": {
+                "status": "SKIP",
+                "detail": "Measurement confidence too low",
+                "measured": metrics.get("contrast_assessment"),
+                "pass": None
+            },
+            "overall_compliance": "SKIP",
+            "compliance_confidence": measurement_confidence
+        }
     
     # Determine font size threshold based on package size
     if package_size_ml <= 500:
@@ -574,7 +615,7 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
             "pass": contrast_pass
         },
         "overall_compliance": "PASS" if overall_pass else "FAIL",
-        "compliance_confidence": metrics.get("measurement_confidence", 0)
+        "compliance_confidence": measurement_confidence
     }
 
 
@@ -758,6 +799,75 @@ class ResponseCache:
 
 
 # ============================================================================
+# BBOX HELPER FUNCTIONS
+# ============================================================================
+
+def denormalize_box_2d(box_2d: List[float], image_width: int, image_height: int) -> Dict[str, int]:
+    """Convert Gemini's native box_2d format to pixel coordinates.
+    
+    Gemini returns: [ymin, xmin, ymax, xmax] normalized 0-1000
+    We convert to: {xmin, ymin, xmax, ymax} in pixel space
+    
+    Args:
+        box_2d: [ymin, xmin, ymax, xmax] in 0-1000 range
+        image_width: Original image width in pixels
+        image_height: Original image height in pixels
+        
+    Returns:
+        Dict with xmin, ymin, xmax, ymax in pixel coordinates
+    """
+    ymin_norm, xmin_norm, ymax_norm, xmax_norm = box_2d
+    
+    # Convert from 0-1000 to 0-1 then scale to image dimensions
+    xmin_px = int(round(xmin_norm / 1000 * image_width))
+    ymin_px = int(round(ymin_norm / 1000 * image_height))
+    xmax_px = int(round(xmax_norm / 1000 * image_width))
+    ymax_px = int(round(ymax_norm / 1000 * image_height))
+    
+    # Ensure valid bounds
+    xmin_px = max(0, min(xmin_px, image_width))
+    ymin_px = max(0, min(ymin_px, image_height))
+    xmax_px = max(0, min(xmax_px, image_width))
+    ymax_px = max(0, min(ymax_px, image_height))
+    
+    # Swap if needed
+    if xmin_px > xmax_px:
+        xmin_px, xmax_px = xmax_px, xmin_px
+    if ymin_px > ymax_px:
+        ymin_px, ymax_px = ymax_px, ymin_px
+    
+    return {
+        "xmin": xmin_px,
+        "ymin": ymin_px,
+        "xmax": xmax_px,
+        "ymax": ymax_px
+    }
+
+def normalize_rect_to_box_2d(rect: Dict[str, int], image_width: int, image_height: int) -> List[float]:
+    """Convert pixel rectangle to Gemini's native box_2d format.
+    
+    Input: {xmin, ymin, xmax, ymax} in pixel coordinates
+    Output: [ymin, xmin, ymax, xmax] normalized 0-1000 (for prompts)
+    
+    Args:
+        rect: Dict with xmin, ymin, xmax, ymax in pixels
+        image_width: Original image width in pixels
+        image_height: Original image height in pixels
+        
+    Returns:
+        List [ymin, xmin, ymax, xmax] in 0-1000 range
+    """
+    xmin, ymin, xmax, ymax = rect["xmin"], rect["ymin"], rect["xmax"], rect["ymax"]
+    
+    # Scale to 0-1000 range
+    ymin_norm = int(round(ymin / image_height * 1000)) if image_height > 0 else 0
+    xmin_norm = int(round(xmin / image_width * 1000)) if image_width > 0 else 0
+    ymax_norm = int(round(ymax / image_height * 1000)) if image_height > 0 else 1000
+    xmax_norm = int(round(xmax / image_width * 1000)) if image_width > 0 else 1000
+    
+    return [ymin_norm, xmin_norm, ymax_norm, xmax_norm]
+
+# ============================================================================
 # GEMINI CLIENT WRAPPER
 # ============================================================================
 
@@ -766,6 +876,12 @@ class GeminiClient:
     
     # Exceptions that are safe to retry (transient / rate-limit).
     RETRYABLE_EXCEPTIONS: Tuple = ()  # populated lazily after import
+    
+    # Maximum dimension (width or height) Gemini accepts before it
+    # internally resizes the image (maintaining aspect ratio).
+    # Gemini returns pixel coordinates in this resized space.
+    # Use _calculate_scale_factor() to convert back to original coordinates.
+    GEMINI_MAX_DIMENSION = 1440  # pixels
 
     def __init__(self, project_id: str, model: str = "gemini-3-pro-preview", location: str = "global",
                  cache: Optional[ResponseCache] = None, max_retries: int = 3):
@@ -775,6 +891,8 @@ class GeminiClient:
         self._client = None
         self.cache = cache or ResponseCache()
         self.max_retries = max_retries
+        self._last_image_width: int = 0   # Track original image dimensions for coordinate denormalization
+        self._last_image_height: int = 0
     
     def _get_client(self):
         """Lazy-load Gemini client"""
@@ -787,20 +905,56 @@ class GeminiClient:
                 raise
         return self._client
     
-    def analyze_image(self, image_data: Dict, prompt: str, response_schema: Optional[Dict] = None) -> str:
+    def _calculate_scale_factor(self, original_width: int, original_height: int) -> float:
+        """Calculate scale factor for Gemini's internal resizing.
+        
+        Gemini resizes images that exceed GEMINI_MAX_DIMENSION in either dimension,
+        maintaining aspect ratio. Coordinates returned are in Gemini's resized space,
+        so we need to scale them back to the original.
+        
+        Returns:
+            scale_factor: multiply Gemini coordinates by this to get original coords
+        """
+        max_dim = max(original_width, original_height)
+        if max_dim <= self.GEMINI_MAX_DIMENSION:
+            return 1.0  # No resize happened
+        
+        scale = max_dim / self.GEMINI_MAX_DIMENSION
+        logger.debug(f"  🔍 Gemini resize detected: {max_dim}px → {self.GEMINI_MAX_DIMENSION}px, scale factor: {scale:.4f}")
+        return scale
+    
+    def analyze_image(self, image_data: Dict, prompt: str, response_schema: Optional[Dict] = None, 
+                      original_width: Optional[int] = None, original_height: Optional[int] = None,
+                      temperature: float = 0.7) -> str:
         """Call Gemini with image and optional structured output.
 
         Results are cached by (image_data, prompt, schema) so repeated
         calls for the same input return instantly without an API round-trip.
+        
+        Args:
+            image_data: Image in Gemini format (inline_data dict)
+            prompt: Prompt text
+            response_schema: Optional JSON schema for structured output
+            original_width: Original image width (before any Gemini resizing)
+            original_height: Original image height (before any Gemini resizing)
+            temperature: Model temperature (0.0=deterministic, 1.0=creative). Default 0.7.
+                Use 0.0-0.5 for precise coordinate detection, 0.7+ for exploratory tasks.
         """
         import time as time_module
         call_start = time_module.time()
         
-        # Check cache first
+        # CRITICAL: Calculate scale factor FIRST, before cache check
+        # This ensures _last_image_scale_factor is always set, even on cache hits
+        if original_width and original_height:
+            self._last_image_scale_factor = self._calculate_scale_factor(original_width, original_height)
+        else:
+            self._last_image_scale_factor = 1.0
+        
+        # Check cache AFTER scale factor is calculated
         cached = self.cache.get(image_data, prompt, response_schema)
         if cached is not None:
             cache_hit_time = time_module.time() - call_start
-            logger.info(f"  ⚡ Cache HIT ({cache_hit_time:.2f}s)")
+            logger.info(f"  ⚡ Cache HIT ({cache_hit_time:.2f}s) - scale factor: {self._last_image_scale_factor:.4f}")
             return cached
 
         client = self._get_client()
@@ -809,15 +963,18 @@ class GeminiClient:
         if response_schema:
             config["response_mime_type"] = "application/json"
             config["response_json_schema"] = response_schema
+        
+        # Set temperature for deterministic results (lower = more precise)
+        config["temperature"] = temperature
 
         # Log image size and prompt length
         inline = image_data.get("inline_data", {})
         img_bytes = len(inline.get("data", "")) * 3 / 4  # base64 decode size estimate
-        logger.debug(f"  📤 Sending to Gemini: image={img_bytes/1e6:.1f}MB, prompt={len(prompt)} chars, schema={'yes' if response_schema else 'no'}")
+        logger.debug(f"  📤 Sending to Gemini: image={img_bytes/1e6:.1f}MB, prompt={len(prompt)} chars, schema={'yes' if response_schema else 'no'}, temp={temperature}")
 
         def _call() -> str:
             api_call_start = time_module.time()
-            logger.info(f"  🔄 Calling Gemini API...")
+            logger.info(f"  🔄 Calling Gemini API (temp={temperature})...")
             response = client.models.generate_content(
                 model=self.model,
                 contents=[prompt, image_data],
@@ -878,6 +1035,7 @@ class LabelAnalyzer:
         self.detected_parts: List[DetectedPart] = []
         self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
+        self._gemini_scale_factor: float = 1.0  # Track coordinate scaling
     
     def clear_cache(self) -> int:
         """Clear all cached API responses. Use when analyzing new images.
@@ -886,6 +1044,52 @@ class LabelAnalyzer:
             Number of cache entries removed
         """
         return self.gemini.cache.clear()
+    
+    def _scale_region_coordinates(self, region: Dict, scale_factor: float) -> Dict:
+        """Scale region coordinates back to original image space.
+        
+        Args:
+            region: Region dict with 'rect' and optional 'polygon_points'
+            scale_factor: Multiply coordinates by this to get original space
+            
+        Returns:
+            Region dict with scaled coordinates
+        """
+        # Check if already scaled to prevent double-scaling
+        if region.get("has_been_scaled"):
+            logger.debug(f"  ⏩ Skipping scale for '{region.get('label', '?')}' - already scaled")
+            return region
+        
+        if scale_factor == 1.0:
+            region["has_been_scaled"] = True
+            return region  # No scaling needed
+        
+        logger.debug(f"  🔄 Scaling region '{region.get('label', '?')}' by {scale_factor:.4f}")
+        
+        # Scale rectangle
+        rect = region.get("rect", {})
+        if rect:
+            region["rect"] = {
+                "xmin": int(round(rect["xmin"] * scale_factor)),
+                "ymin": int(round(rect["ymin"] * scale_factor)),
+                "xmax": int(round(rect["xmax"] * scale_factor)),
+                "ymax": int(round(rect["ymax"] * scale_factor))
+            }
+        
+        # Scale polygon points if present
+        if region.get("polygon_points"):
+            region["polygon_points"] = [
+                {
+                    "x": int(round(p["x"] * scale_factor)),
+                    "y": int(round(p["y"] * scale_factor))
+                }
+                for p in region["polygon_points"]
+            ]
+        
+        # Mark as scaled to prevent re-scaling in later stages
+        region["has_been_scaled"] = True
+        
+        return region
     
     # ========================================================================
     # STAGE 0: CALIBRATION
@@ -952,7 +1156,12 @@ If no measurement line is found, set measurement_line to null.
         
         try:
             logger.debug(f"  📋 Calibration prompt length: {len(prompt)} chars")
-            response_text = self.gemini.analyze_image(image_data, prompt, calibration_schema)
+            # Pass original dimensions for scale factor tracking
+            img_w, img_h = self._image_size
+            response_text = self.gemini.analyze_image(
+                image_data, prompt, calibration_schema,
+                original_width=img_w, original_height=img_h
+            )
             
             logger.debug(f"  📥 Raw response: {response_text[:500]}")  # First 500 chars
             response = json.loads(response_text)
@@ -960,7 +1169,19 @@ If no measurement line is found, set measurement_line to null.
             
             if response.get("measurement_line"):
                 line_data = response["measurement_line"]
-                logger.info(f"  🎯 Found measurement line: {line_data}")
+                logger.info(f"  🎯 Found measurement line (pre-scale): {line_data}")
+                
+                # CRITICAL: Scale coordinates back to original image space
+                # Gemini returns coordinates in its internally-resized space
+                scale_factor = self.gemini._last_image_scale_factor
+                if scale_factor != 1.0:
+                    logger.info(f"  🔄 Scaling calibration coordinates by {scale_factor:.4f}")
+                    line_data["start_point"]["x"] = int(round(line_data["start_point"]["x"] * scale_factor))
+                    line_data["start_point"]["y"] = int(round(line_data["start_point"]["y"] * scale_factor))
+                    line_data["end_point"]["x"] = int(round(line_data["end_point"]["x"] * scale_factor))
+                    line_data["end_point"]["y"] = int(round(line_data["end_point"]["y"] * scale_factor))
+                    logger.info(f"  ✓ Scaled measurement line: {line_data}")
+                
                 line = MeasurementLine(
                     start_point=Point(**line_data["start_point"]),
                     end_point=Point(**line_data["end_point"]),
@@ -992,27 +1213,70 @@ If no measurement line is found, set measurement_line to null.
         """
         Stage 1: Identify all rough regions (CLP vs Non-CLP)
         
+        Parses Gemini's native box_2d format [ymin, xmin, ymax, xmax] (0-1000 normalized)
+        and denormalizes to pixel coordinates in original image space.
+        
         Returns:
-            List of detected regions with classifications
+            List of detected regions with classifications (coordinates in original space)
         """
         import time as time_module
         stage_start = time_module.time()
         logger.info("Stage 1: Rough Part Detection")
         
         try:
+            # Pass original dimensions so Gemini can calculate scale factor
+            img_w, img_h = self._image_size
+            
+            # Call Gemini with low temperature for deterministic results
             response_text = self.gemini.analyze_image(
                 image_data, 
                 PROMPT_ROUGH_DETECTION,
-                ROUGH_DETECTION_SCHEMA
+                ROUGH_DETECTION_SCHEMA,
+                original_width=img_w,
+                original_height=img_h,
+                temperature=0.5  # Lower temp for more precise coordinates
             )
             response = json.loads(response_text)
             
             regions = response.get("regions", [])
+            
+            # Denormalize box_2d format [ymin, xmin, ymax, xmax] to pixel coordinates
+            logger.info(f"  📐 Denormalizing {len(regions)} box_2d bounding boxes...")
+            for region in regions:
+                if "box_2d" in region:
+                    box_2d = region.pop("box_2d")
+                    # Gemini coordinates are in its resized space if scaling occurred
+                    # We need to scale them back to original image space BEFORE denormalizing
+                    scale_factor = self.gemini._last_image_scale_factor
+                    
+                    # Denormalize to Gemini's coordinate space first
+                    gemini_width = int(img_w / scale_factor) if scale_factor > 1.0 else img_w
+                    gemini_height = int(img_h / scale_factor) if scale_factor > 1.0 else img_h
+                    rect = denormalize_box_2d(box_2d, gemini_width, gemini_height)
+                    
+                    # Then scale back to original image space if needed
+                    if scale_factor != 1.0:
+                        rect = {
+                            "xmin": int(round(rect["xmin"] * scale_factor)),
+                            "ymin": int(round(rect["ymin"] * scale_factor)),
+                            "xmax": int(round(rect["xmax"] * scale_factor)),
+                            "ymax": int(round(rect["ymax"] * scale_factor))
+                        }
+                    
+                    region["rect"] = rect
+                    logger.debug(f"    box_2d={box_2d} → pixel rect=({rect['xmin']},{rect['ymin']})-({rect['xmax']},{rect['ymax']})")
+            
+            self._gemini_scale_factor = self.gemini._last_image_scale_factor
+            
             elapsed = time_module.time() - stage_start
             logger.info(f"✓ Detected {len(regions)} regions in {elapsed:.1f}s")
             
             for i, region in enumerate(regions):
-                logger.debug(f"  Region {i}: {region['classification']} - {region['label']} (conf: {region.get('confidence', 0):.2f})")
+                rect = region.get('rect', {})
+                if rect:
+                    logger.info(f"  Region {i}: {region['classification']:8s} - {region['label']:25s} @ ({rect['xmin']},{rect['ymin']})-({rect['xmax']},{rect['ymax']}) conf={region.get('confidence', 0):.2f}")
+                else:
+                    logger.info(f"  Region {i}: {region['classification']:8s} - {region['label']:25s} (no rect) conf={region.get('confidence', 0):.2f}")
             
             return regions
             
@@ -1028,41 +1292,69 @@ If no measurement line is found, set measurement_line to null.
         """
         Stage 2: Refine boundaries and detect irregular shapes
         
+        Parses refined_box_2d format and denormalizes to pixel coordinates.
+        
         Returns:
-            Refined region with better boundaries
+            Refined region with better boundaries (coordinates in original space)
         """
         classification = region["classification"]
         label = region["label"]
         content_type = region.get("content_type", "Unknown")
         rect = region["rect"]
         
+        # Convert pixel rect to 0-1000 normalized coords for prompt
+        img_w, img_h = self._image_size
+        box_2d = normalize_rect_to_box_2d(rect, img_w, img_h)
+        ymin_norm, xmin_norm, ymax_norm, xmax_norm = box_2d
+        
         prompt = PROMPT_BOUNDARY_REFINEMENT.format(
             classification=classification,
             label=label,
             content_type=content_type,
-            xmin=rect["xmin"],
-            ymin=rect["ymin"],
-            xmax=rect["xmax"],
-            ymax=rect["ymax"]
+            xmin=xmin_norm,
+            ymin=ymin_norm,
+            xmax=xmax_norm,
+            ymax=ymax_norm
         )
         
         try:
             response_text = self.gemini.analyze_image(
                 image_data,
                 prompt,
-                BOUNDARY_REFINEMENT_SCHEMA
+                BOUNDARY_REFINEMENT_SCHEMA,
+                original_width=img_w,
+                original_height=img_h,
+                temperature=0.5  # Low temp for precise refinement
             )
             response = json.loads(response_text)
             
+            # Parse refined_box_2d if provided
+            refined_box_2d = response.get("refined_box_2d")
+            if refined_box_2d:
+                logger.debug(f"  📐 Refined box_2d: {refined_box_2d}")
+                new_rect = denormalize_box_2d(refined_box_2d, img_w, img_h)
+            else:
+                new_rect = None
+            
+            got_new_rect = new_rect is not None
+            
+            # Build refined dict WITHOUT **region spread to avoid copying flags
             refined = {
-                **region,
-                "rect": response.get("refined_rect", rect),
+                "classification": region["classification"],
+                "label": region["label"],
+                "content_type": region.get("content_type", "Unknown"),
+                "confidence": region.get("confidence", 0.5),
+                "rect": new_rect if got_new_rect else rect,
                 "has_irregular_shape": response.get("has_irregular_shape", False),
                 "polygon_points": response.get("polygon_points"),
                 "refinement_confidence": response.get("refinement_confidence", 0.8)
             }
             
-            logger.debug(f"✓ Refined: {label} (irregular: {refined['has_irregular_shape']})")
+            out_rect = refined.get('rect', {})
+            if out_rect:
+                logger.info(f"  ✓ Refined: {label} ({out_rect['xmin']},{out_rect['ymin']})-({out_rect['xmax']},{out_rect['ymax']}) irregular={refined['has_irregular_shape']}")
+            else:
+                logger.info(f"  ✓ Refined: {label} (no rect) irregular={refined['has_irregular_shape']}")
             return refined
             
         except Exception as e:
@@ -1093,6 +1385,9 @@ If no measurement line is found, set measurement_line to null.
         
         try:
             # LAYER 1: GEMINI MEASURES (not judges)
+            # IMPORTANT: Use ORIGINAL calibration DPI, not cropped image DPI
+            # The cropped image inherits the same pixel density as the original
+            # No need to recalibrate - DPI is a property of the PDF/scan resolution
             validation_prompt = get_clp_validation_prompt(
                 self.calibration.true_dpi,
                 self.calibration.dpmm,
@@ -1100,7 +1395,6 @@ If no measurement line is found, set measurement_line to null.
             )
             
             # Convert cropped region to base64
-            import time as time_module
             encode_start = time_module.time()
             buffered = BytesIO()
             cropped_image.save(buffered, format="JPEG")
@@ -1116,37 +1410,69 @@ If no measurement line is found, set measurement_line to null.
                 }
             }
             
+            # Pass cropped image dimensions for proper scale factor tracking
+            # Even though cropped regions typically won't need resizing, pass dimensions for consistency
+            cropped_w, cropped_h = cropped_image.size
             response_text = self.gemini.analyze_image(
                 cropped_data,
                 validation_prompt,
-                CLP_VALIDATION_SCHEMA
+                CLP_VALIDATION_SCHEMA,
+                original_width=cropped_w,
+                original_height=cropped_h
             )
             
             measurements = json.loads(response_text)
             
-            # Log measurements for accuracy audit
-            font_mm = measurements.get('font_size_mm', 0) or 0
-            font_px = measurements.get('font_size_pixels', 0) or 0
-            line_dist_mm = measurements.get('line_distance_mm', 0) or 0
-            line_dist_px = measurements.get('line_distance_pixels', 0) or 0
-            meas_conf = measurements.get('measurement_confidence', 0) or 0
+            # Safely extract measurements with numeric coercion
+            try:
+                font_mm = float(measurements.get('font_size_mm') or 0)
+            except (ValueError, TypeError):
+                font_mm = 0
+            
+            try:
+                font_px = float(measurements.get('font_size_pixels') or 0)
+            except (ValueError, TypeError):
+                font_px = 0
+                
+            try:
+                line_dist_mm = float(measurements.get('line_distance_mm') or 0)
+            except (ValueError, TypeError):
+                line_dist_mm = 0
+                
+            try:
+                line_dist_px = float(measurements.get('line_distance_pixels') or 0)
+            except (ValueError, TypeError):
+                line_dist_px = 0
+                
+            try:
+                meas_conf = float(measurements.get('measurement_confidence') or 0)
+            except (ValueError, TypeError):
+                meas_conf = 0
             
             logger.info(f"  ✓ Gemini measurements:")
             logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px)")
             logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px)")
-            logger.info(f"    Background: {measurements.get('background_color')} text")
-            logger.info(f"    Contrast: {measurements.get('contrast_assessment')}")
+            logger.info(f"    Background: {measurements.get('background_color', 'unknown')} text")
+            logger.info(f"    Contrast: {measurements.get('contrast_assessment', 'unknown')}")
             logger.info(f"    Confidence: {meas_conf:.0%}")
+            if measurements.get('notes'):
+                logger.info(f"    Notes: {measurements.get('notes')}")
             
-            # Check if measurements are valid (not all zeros/None) - skip if clearly unreadable
-            if (font_mm < 0.1 and line_dist_mm < 0.1) or meas_conf == 0:
-                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - measurements indicate no readable text (font={font_mm:.2f}mm, conf={meas_conf:.0%})")
+            # Check if region is genuinely unreadable (all measurements are near-zero)
+            is_unreadable = (font_mm < 0.1 and line_dist_mm < 0.1) or meas_conf < 0.1
+            
+            if is_unreadable:
+                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - measurements indicate no readable text (font={font_mm:.2f}mm, confidence={meas_conf:.0%})")
                 return {
                     "measurements": measurements,
-                    "rule_results": {},
+                    "rule_results": {
+                        "rule_1_font_size": {"status": "SKIP", "detail": "Region unreadable - no measurable text", "pass": None},
+                        "rule_2_line_distance": {"status": "SKIP", "detail": "Region unreadable - no measurable text", "pass": None},
+                        "rule_3_background_contrast": {"status": "SKIP", "detail": "Region unreadable - no measurable text", "pass": None}
+                    },
                     "overall_compliance": "SKIP",
-                    "compliance_confidence": 0,
-                    "error": "Region unreadable - no text detected"
+                    "compliance_confidence": meas_conf,
+                    "measurement_confidence": meas_conf
                 }
             
             # LAYER 2: LOCAL DETERMINISTIC RULE CHECKS (100% reproducible)
@@ -1166,13 +1492,33 @@ If no measurement line is found, set measurement_line to null.
                 "measurements": measurements,
                 "rule_results": rule_results,
                 "overall_compliance": rule_results["overall_compliance"],
-                "compliance_confidence": measurements.get("measurement_confidence", 0)
+                "compliance_confidence": measurements.get("measurement_confidence", 0),
+                "measurement_confidence": meas_conf
             }
             
+        except json.JSONDecodeError as e:
+            val_time = time_module.time() - val_start
+            logger.error(f"  ❌ JSON parse error in Stage 3 for '{region_label}' ({val_time:.1f}s): {e}")
+            logger.error(f"     Response preview: {response_text[:300] if 'response_text' in locals() else 'N/A'}")
+            # Return safe error structure (won't crash downstream)
+            return {
+                "measurements": {},
+                "rule_results": {},
+                "overall_compliance": "ERROR",
+                "compliance_confidence": 0,
+                "error": f"JSON parse failed: {str(e)}"
+            }
         except Exception as e:
             val_time = time_module.time() - val_start
-            logger.error(f"CLP validation failed for '{region_label}' after {val_time:.1f}s: {e}")
-            return {"error": str(e)}
+            logger.error(f"  ❌ CLP validation failed for '{region_label}' ({val_time:.1f}s): {type(e).__name__}: {e}")
+            # Return safe error structure (won't crash downstream)
+            return {
+                "measurements": {},
+                "rule_results": {},
+                "overall_compliance": "ERROR",
+                "compliance_confidence": 0,
+                "error": f"Validation error: {str(e)}"
+            }
     
     # ========================================================================
     # STAGE 4: CONVERT TO INTERNAL FORMAT & FILTER
@@ -1307,12 +1653,25 @@ If no measurement line is found, set measurement_line to null.
             if region["classification"] == "CLP":
                 # Crop the region for closer analysis
                 rect = region["rect"]
-                cropped = image.crop((
-                    rect["xmin"],
-                    rect["ymin"],
-                    rect["xmax"],
-                    rect["ymax"]
-                ))
+                
+                # Ensure crop coordinates are within image bounds
+                xmin = max(0, int(rect["xmin"]))
+                ymin = max(0, int(rect["ymin"]))
+                xmax = min(image.width, int(rect["xmax"]))
+                ymax = min(image.height, int(rect["ymax"]))
+                
+                # Validate crop is non-empty
+                if xmax <= xmin or ymax <= ymin:
+                    logger.warning(f"Skipping region '{region['label']}': invalid crop bounds ({xmin},{ymin})-({xmax},{ymax})")
+                    region["compliance_check"] = {
+                        "error": "Invalid crop coordinates",
+                        "overall_compliance": "SKIP"
+                    }
+                    continue
+                
+                cropped = image.crop((xmin, ymin, xmax, ymax))
+                logger.info(f"  ✓ Cropped '{region['label']}': {cropped.width}×{cropped.height}px")
+                
                 compliance = self.validate_clp_compliance(image_data, region, cropped)
                 region["compliance_check"] = compliance
         
@@ -1339,15 +1698,26 @@ If no measurement line is found, set measurement_line to null.
         if review_flagged:
             logger.warning(f"⚠️  HUMAN REVIEW NEEDED: {len(review_flagged)} regions flagged (low confidence or borderline)")
             for p in review_flagged:
-                logger.warning(f"   - {p.label} (confidence: {p.compliance_check.get('measurement_confidence', 'N/A'):.0%})")
+                compliance = p.compliance_check or {}
+                meas_conf = compliance.get('measurement_confidence', compliance.get('compliance_confidence', 'N/A'))
+                if isinstance(meas_conf, (int, float)):
+                    conf_str = f"{meas_conf:.0%}"
+                else:
+                    conf_str = str(meas_conf)
+                logger.warning(f"   - {p.label} (confidence: {conf_str}, status: {compliance.get('overall_compliance', 'unknown')})")
         logger.info("=" * 60)
         
         # Auto-save visualization to Desktop (create dir if needed)
+        # Generate unique filename with timestamp to avoid overwrites
         try:
+            import datetime
             viz_dir = Path.home() / "Desktop"
             viz_dir.mkdir(parents=True, exist_ok=True)
-            viz_path = str(viz_dir / "label_analysis_visualization.jpg")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            viz_filename = f"label_analysis_{timestamp}.jpg"
+            viz_path = str(viz_dir / viz_filename)
             self.visualize(image, output_path=viz_path)
+            logger.info(f"✓ Visualization saved with unique filename: {viz_filename}")
         except Exception as e:
             logger.warning(f"Could not save visualization: {e}")
         
@@ -1366,6 +1736,7 @@ If no measurement line is found, set measurement_line to null.
         cache_dir: Optional[str] = None,
         confidence_weights: Optional[Dict[str, float]] = None,
         on_complete: Optional[Callable[['BatchResult', int, int], None]] = None,
+        use_cache: bool = True,
     ) -> List['BatchResult']:
         """Analyze multiple label images concurrently.
 
@@ -1413,6 +1784,7 @@ If no measurement line is found, set measurement_line to null.
                 analyzer = LabelAnalyzer(
                     project_id, dpi=dpi, cache_dir=cache_dir,
                     confidence_weights=confidence_weights,
+                    use_cache=use_cache,
                 )
                 parts = analyzer.analyze(img, image_data)
                 return BatchResult(
@@ -1514,7 +1886,11 @@ If no measurement line is found, set measurement_line to null.
         return files
     
     def visualize(self, image: PIL_Image.Image, output_path: Optional[str] = None) -> PIL_Image.Image:
-        """Draw detected regions on image and optionally save to file"""
+        """Draw detected regions on image and optionally save to file.
+        
+        NOTE: All coordinates must be in the SAME SPACE as the input image.
+        If image was resized, coordinates should be scaled proportionally.
+        """
         img_copy = image.copy()
         draw = PIL_ImageDraw.Draw(img_copy)
         
@@ -1532,16 +1908,27 @@ If no measurement line is found, set measurement_line to null.
                 draw.polygon(points, outline=color, width=5)
             else:
                 rect = part.rect
-                draw.rectangle(
-                    [(rect.xmin, rect.ymin), (rect.xmax, rect.ymax)],
-                    outline=color,
-                    width=5
-                )
-            
-            # Add label
-            center_x, center_y = part.rect.center()
-            text = f"{part.label}\n({part.confidence:.0%})"
-            draw.text((center_x, center_y), text, fill=color)
+                # CRITICAL: Ensure rectangle is within image bounds
+                # This prevents boxes from appearing in wrong locations
+                xmin = max(0, rect.xmin)
+                ymin = max(0, rect.ymin)
+                xmax = min(image.width, rect.xmax)
+                ymax = min(image.height, rect.ymax)
+                
+                if xmax > xmin and ymax > ymin:  # Valid box
+                    draw.rectangle(
+                        [(xmin, ymin), (xmax, ymax)],
+                        outline=color,
+                        width=5
+                    )
+                    
+                    # Add label at center
+                    center_x = (xmin + xmax) // 2
+                    center_y = (ymin + ymax) // 2
+                    text = f"{part.label}\n({part.confidence:.0%})"
+                    draw.text((center_x, center_y), text, fill=color)
+                else:
+                    logger.warning(f"Skipped invalid box for {part.label}: ({xmin},{ymin})-({xmax},{ymax}) in {image.width}×{image.height} image")
         
         # Auto-save if path provided
         if output_path:
