@@ -1093,9 +1093,12 @@ If no measurement line is found, set measurement_line to null.
             encode_time = time_module.time() - encode_start
             logger.debug(f"  📸 Image encoding took {encode_time:.2f}s ({len(cropped_b64)/1e6:.1f}MB base64)")
             
+            # Correct Gemini API format: inline_data wrapper
             cropped_data = {
-                "data": cropped_b64,
-                "mime_type": "image/jpeg"
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": cropped_b64
+                }
             }
             
             response_text = self.gemini.analyze_image(
