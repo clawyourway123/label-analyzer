@@ -868,14 +868,24 @@ class LabelAnalyzer:
     """Production-ready label analyzer with multi-stage detection"""
     
     def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None,
-                 confidence_weights: Optional[Dict[str, float]] = None):
-        cache = ResponseCache(cache_dir=cache_dir)
+                 confidence_weights: Optional[Dict[str, float]] = None, use_cache: bool = True):
+        cache = ResponseCache(cache_dir=cache_dir) if use_cache else ResponseCache(cache_dir=cache_dir)
+        if not use_cache:
+            cache.disable()
         self.gemini = GeminiClient(project_id, cache=cache)
         self.original_dpi = dpi
         self.calibration = CalibrationResult(dpi)
         self.detected_parts: List[DetectedPart] = []
         self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
+    
+    def clear_cache(self) -> int:
+        """Clear all cached API responses. Use when analyzing new images.
+        
+        Returns:
+            Number of cache entries removed
+        """
+        return self.gemini.cache.clear()
     
     # ========================================================================
     # STAGE 0: CALIBRATION
