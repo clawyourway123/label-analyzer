@@ -1332,9 +1332,14 @@ If no measurement line is found, set measurement_line to null.
                 logger.warning(f"   - {p.label} (confidence: {p.compliance_check.get('measurement_confidence', 'N/A'):.0%})")
         logger.info("=" * 60)
         
-        # Auto-save visualization to Desktop
-        viz_path = str(Path.home() / "Desktop" / "label_analysis_visualization.jpg")
-        self.visualize(image, output_path=viz_path)
+        # Auto-save visualization to Desktop (create dir if needed)
+        try:
+            viz_dir = Path.home() / "Desktop"
+            viz_dir.mkdir(parents=True, exist_ok=True)
+            viz_path = str(viz_dir / "label_analysis_visualization.jpg")
+            self.visualize(image, output_path=viz_path)
+        except Exception as e:
+            logger.warning(f"Could not save visualization: {e}")
         
         return self.detected_parts
     
