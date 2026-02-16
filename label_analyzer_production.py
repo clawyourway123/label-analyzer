@@ -20,7 +20,8 @@ import hashlib
 import logging
 import time
 import random
-from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 from typing import List, Optional, Dict, Tuple, Callable, TypeVar
 from pathlib import Path
@@ -235,6 +236,28 @@ class DetectedPart:
     def is_confident(self, threshold: float = 0.7) -> bool:
         """Check if detection meets confidence threshold"""
         return self.confidence >= threshold
+
+
+@dataclass
+class BatchResult:
+    """Result of analyzing a single image in a batch run.
+
+    Attributes:
+        path: Original file path of the image.
+        parts: Detected label parts (empty on failure).
+        analyzer: The LabelAnalyzer instance used (carries calibration state).
+        error: Exception if analysis failed, else None.
+        elapsed_seconds: Wall-clock time for this image.
+    """
+    path: str
+    parts: List[DetectedPart] = field(default_factory=list)
+    analyzer: Optional['LabelAnalyzer'] = None
+    error: Optional[Exception] = None
+    elapsed_seconds: float = 0.0
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 
 class MeasurementLine(BaseModel):
@@ -895,6 +918,93 @@ class LabelAnalyzer:
         return self.detected_parts
     
     # ========================================================================
+    # BATCH PROCESSING
+    # ========================================================================
+
+    @staticmethod
+    def analyze_batch(
+        image_paths: List[str],
+        project_id: str,
+        dpi: int = 300,
+        max_workers: int = 3,
+        cache_dir: Optional[str] = None,
+        confidence_weights: Optional[Dict[str, float]] = None,
+        on_complete: Optional[Callable[['BatchResult', int, int], None]] = None,
+    ) -> List['BatchResult']:
+        """Analyze multiple label images concurrently.
+
+        Each image gets its own ``LabelAnalyzer`` instance (independent
+        calibration state) but they share the same disk cache, so identical
+        images are not re-processed.
+
+        Args:
+            image_paths: List of file paths to images or PDFs.
+            project_id: GCP project ID for Gemini.
+            dpi: Default DPI for PDF rendering.
+            max_workers: Maximum concurrent analyses. Keep ≤ 5 to respect
+                Gemini rate limits.
+            cache_dir: Shared cache directory (default: ~/.cache/label_analyzer).
+            confidence_weights: Override ensemble confidence weights.
+            on_complete: Optional callback ``(result, index, total)`` invoked
+                after each image finishes (useful for progress bars).
+
+        Returns:
+            List of ``BatchResult`` in the same order as *image_paths*.
+
+        Example::
+
+            results = LabelAnalyzer.analyze_batch(
+                ["label1.jpg", "label2.pdf"],
+                project_id="my-project",
+                on_complete=lambda r, i, n: print(f"[{i+1}/{n}] {r.path}: {'OK' if r.success else 'FAIL'}"),
+            )
+            for r in results:
+                if r.success:
+                    print(f"{r.path}: {len(r.parts)} parts in {r.elapsed_seconds:.1f}s")
+        """
+        total = len(image_paths)
+        results: List[Optional[BatchResult]] = [None] * total
+
+        def _process_one(index: int, path: str) -> BatchResult:
+            t0 = time.monotonic()
+            try:
+                if path.lower().endswith(".pdf"):
+                    img, _ = pdf_to_image(path, dpi=dpi)
+                else:
+                    img = PIL_Image.open(path)
+
+                image_data = image_to_base64(img)
+                analyzer = LabelAnalyzer(
+                    project_id, dpi=dpi, cache_dir=cache_dir,
+                    confidence_weights=confidence_weights,
+                )
+                parts = analyzer.analyze(img, image_data)
+                return BatchResult(
+                    path=path, parts=parts, analyzer=analyzer,
+                    elapsed_seconds=time.monotonic() - t0,
+                )
+            except Exception as exc:
+                logger.error(f"Batch item failed [{path}]: {exc}")
+                return BatchResult(
+                    path=path, error=exc,
+                    elapsed_seconds=time.monotonic() - t0,
+                )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_process_one, i, p): i
+                for i, p in enumerate(image_paths)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                result = future.result()
+                results[idx] = result
+                if on_complete:
+                    on_complete(result, idx, total)
+
+        return results  # type: ignore[return-value]
+
+    # ========================================================================
     # OUTPUT & VISUALIZATION
     # ========================================================================
     
@@ -1000,7 +1110,17 @@ def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer,
     return analyzer, parts
 
 
+def analyze_batch(image_paths: List[str], project_id: str, **kwargs) -> List[BatchResult]:
+    """Convenience wrapper for ``LabelAnalyzer.analyze_batch``.
+
+    Accepts the same keyword arguments. See
+    :meth:`LabelAnalyzer.analyze_batch` for full documentation.
+    """
+    return LabelAnalyzer.analyze_batch(image_paths, project_id, **kwargs)
+
+
 if __name__ == "__main__":
     # Example usage
     print("Production-ready CLP Label Analyzer loaded")
     print("Use: analyzer, parts = analyze_image_file('path/to/image.jpg', 'your-project-id')")
+    print("Batch: results = analyze_batch(['img1.jpg', 'img2.jpg'], 'your-project-id')")
