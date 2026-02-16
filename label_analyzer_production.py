@@ -246,11 +246,8 @@ class DetectedPart:
         if self.classification != PartClassification.CLP:
             return True  # Non-CLP regions don't have strict compliance rules
         
-        return (
-            self.compliance_check.get("font_size_compliance") == "PASS" and
-            self.compliance_check.get("line_distance_compliance") == "PASS" and
-            self.compliance_check.get("background_contrast_compliance") == "PASS"
-        )
+        # Check overall_compliance from rule_results
+        return self.compliance_check.get("overall_compliance") == "PASS"
 
 
 @dataclass
@@ -424,53 +421,123 @@ BOUNDARY_REFINEMENT_SCHEMA = {
 # DETECTION STAGE 3: CLP COMPLIANCE VALIDATION
 # ============================================================================
 
-def get_clp_validation_prompt(true_dpi: int, dpmm: float) -> str:
-    """Generate CLP validation prompt with DPI-adjusted pixel thresholds."""
-    min_px_small = 1.2 * dpmm    # 1.2 mm @ true DPI
-    min_px_medium = 1.4 * dpmm   # 1.4 mm @ true DPI
-    min_px_large = 1.8 * dpmm    # 1.8 mm @ true DPI
+def get_clp_validation_prompt(true_dpi: int, dpmm: float, package_size_ml: int = 500) -> str:
+    """Generate CLP validation prompt that measures (not judges) compliance.
     
+    Args:
+        true_dpi: Calibrated DPI
+        dpmm: Pixels per millimeter
+        package_size_ml: Package size in ml (determines font size threshold)
+    """
     return f"""
-You are validating CLP compliance for a product label section.
+You are MEASURING font sizes and spacing on a CLP label section.
+Do NOT judge compliance. Just provide the measurements.
 
 ### **Reference Scale:**
-The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm). Use this to verify font sizes and spacing.
+The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm).
 
-### **Rules for CLP-related parts:**
+### **Task: Measure these metrics (provide numbers, not judgments):**
 
-**1. Font-size requirement (minimum physical size):**
-- Packaging ≤ 500 ml → **≥ 7.03 points (1.2 mm or ~{min_px_small:.0f} pixels)**
-- Packaging > 500 ml and ≤ 3000 ml → **≥ 8.20 points (1.4 mm or ~{min_px_medium:.0f} pixels)**
-- Packaging > 3000 ml → **≥ 10.50 points (1.8 mm or ~{min_px_large:.0f} pixels)**
-- For inner packaging ≤ 10 ml → may be smaller, but must remain easily legible.
+1. **Font size:** Find the smallest readable text in the CLP section. 
+   - Measure the height of a capital letter (e.g., "H") in pixels
+   - Convert to mm using: mm = pixels / {dpmm:.2f}
+   - Report both: {{pixels: X, mm: Y}}
 
-**2. Line-distance rule:**
-Distance between two lines must be **≥ 120% of the font size**.
+2. **Line distance:** Measure the vertical gap between two consecutive lines of text.
+   - Measure from baseline of one line to baseline of next line
+   - Report in pixels and mm
 
-**3. Background rule:**
-Background of all CLP text must be **white with black font** (or high contrast equivalent).
+3. **Background color:** Describe the background of the text region
+   - Is it white? Black? Another color? Gradient?
+   - Describe the text color (black, white, other)
+   - Is there sufficient contrast? (visual assessment only)
 
-Analyze the region and report:
-1. Whether it complies with each rule (PASS/FAIL/UNCLEAR)
-2. Estimated font size in pixels and mm
-3. Any violations found
-4. Confidence level in your assessment
+### **Important:**
+- Be as precise as possible with pixel measurements
+- If no clear measurements possible, indicate "unclear" with your reasoning
+- Assume package size is {package_size_ml} ml for font size thresholds
 """
 
 CLP_VALIDATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "font_size_pixels": {"type": "number", "description": "Estimated font size in pixels"},
-        "font_size_mm": {"type": "number", "description": "Estimated font size in mm"},
-        "font_size_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"], "description": "Whether font meets minimum size"},
-        "line_distance_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"]},
-        "background_contrast_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"]},
-        "violations": {"type": "array", "items": {"type": "string"}},
-        "notes": {"type": "string"},
-        "compliance_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        "font_size_pixels": {"type": "number", "description": "Measured font height in pixels"},
+        "font_size_mm": {"type": "number", "description": "Calculated font size in mm"},
+        "line_distance_pixels": {"type": "number", "description": "Measured baseline-to-baseline distance in pixels"},
+        "line_distance_mm": {"type": "number", "description": "Calculated line distance in mm"},
+        "background_color": {"type": "string", "description": "Described background color"},
+        "text_color": {"type": "string", "description": "Described text color"},
+        "contrast_assessment": {"type": "string", "description": "Contrast quality (high/medium/low)"},
+        "measurement_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How confident in measurements (0-1)"},
+        "notes": {"type": "string", "description": "Any ambiguities or special observations"}
     },
-    "required": ["font_size_pixels", "font_size_mm", "font_size_compliance", "line_distance_compliance", "background_contrast_compliance", "violations", "compliance_confidence"]
+    "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence"]
 }
+
+def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500) -> Dict:
+    """Apply CLP rules to measurements. 100% deterministic."""
+    
+    # Determine font size threshold based on package size
+    if package_size_ml <= 500:
+        min_font_mm = 1.2
+        rule_label = "≤500 ml"
+    elif package_size_ml <= 3000:
+        min_font_mm = 1.4
+        rule_label = "500-3000 ml"
+    else:
+        min_font_mm = 1.8
+        rule_label = ">3000 ml"
+    
+    font_mm = metrics.get("font_size_mm", 0)
+    line_mm = metrics.get("line_distance_mm", 0)
+    contrast = metrics.get("contrast_assessment", "").lower()
+    
+    # Rule 1: Font size
+    font_pass = font_mm >= min_font_mm
+    font_status = "PASS" if font_pass else "FAIL"
+    font_detail = f"{font_mm:.2f} mm ({rule_label} requires ≥{min_font_mm} mm)"
+    
+    # Rule 2: Line distance (≥120% of font size)
+    min_line_mm = font_mm * 1.2
+    line_pass = line_mm >= min_line_mm if line_mm > 0 else None
+    if line_pass is None:
+        line_status = "UNCLEAR"
+        line_detail = "Line distance not measurable"
+    else:
+        line_status = "PASS" if line_pass else "FAIL"
+        line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
+    
+    # Rule 3: Background contrast
+    contrast_pass = contrast in ["high", "excellent", "good"]
+    contrast_status = "PASS" if contrast_pass else "FAIL" if contrast == "low" else "UNCLEAR"
+    contrast_detail = f"Contrast: {metrics.get('contrast_assessment', 'unknown')} ({metrics.get('background_color')} bg, {metrics.get('text_color')} text)"
+    
+    overall_pass = font_pass and (line_pass if line_pass is not None else True) and contrast_pass
+    
+    return {
+        "rule_1_font_size": {
+            "status": font_status,
+            "detail": font_detail,
+            "threshold_mm": min_font_mm,
+            "measured_mm": font_mm,
+            "pass": font_pass
+        },
+        "rule_2_line_distance": {
+            "status": line_status,
+            "detail": line_detail,
+            "threshold_mm": min_line_mm,
+            "measured_mm": line_mm,
+            "pass": line_pass
+        },
+        "rule_3_background_contrast": {
+            "status": contrast_status,
+            "detail": contrast_detail,
+            "measured": metrics.get("contrast_assessment"),
+            "pass": contrast_pass
+        },
+        "overall_compliance": "PASS" if overall_pass else "FAIL",
+        "compliance_confidence": metrics.get("measurement_confidence", 0)
+    }
 
 
 # ============================================================================
@@ -883,23 +950,28 @@ class LabelAnalyzer:
     # STAGE 3: CLP COMPLIANCE VALIDATION
     # ========================================================================
     
-    def validate_clp_compliance(self, image_data: Dict, region: Dict, cropped_image: PIL_Image.Image) -> Dict:
+    def validate_clp_compliance(self, image_data: Dict, region: Dict, cropped_image: PIL_Image.Image, package_size_ml: int = 500) -> Dict:
         """
-        Stage 3: Validate CLP regions against compliance rules
+        Stage 3: Two-layer CLP compliance validation
+        
+        Layer 1: Gemini MEASURES (font size, line distance, contrast)
+        Layer 2: Local rules apply deterministic checks
         
         Only applies to CLP-classified regions.
-        Returns compliance check results.
+        Returns: {measurements, rule_results, overall_compliance}
         """
         if region["classification"] != "CLP":
             return {}  # Non-CLP regions don't need validation
         
-        logger.info(f"Stage 3: Validating CLP compliance for '{region['label']}'")
+        region_label = region['label']
+        logger.info(f"Stage 3: Measuring CLP metrics for '{region_label}'")
         
         try:
-            # Get validation prompt with DPI-adjusted thresholds
+            # LAYER 1: GEMINI MEASURES (not judges)
             validation_prompt = get_clp_validation_prompt(
                 self.calibration.true_dpi,
-                self.calibration.dpmm
+                self.calibration.dpmm,
+                package_size_ml
             )
             
             # Convert cropped region to base64
@@ -918,16 +990,36 @@ class LabelAnalyzer:
                 CLP_VALIDATION_SCHEMA
             )
             
-            compliance = json.loads(response_text)
-            logger.info(f"  Font size: {compliance.get('font_size_mm', 'N/A'):.2f} mm")
-            logger.info(f"  Font compliance: {compliance.get('font_size_compliance', 'UNCLEAR')}")
-            logger.info(f"  Violations: {len(compliance.get('violations', []))}")
+            measurements = json.loads(response_text)
             
-            return compliance
+            # Log measurements for accuracy audit
+            logger.info(f"  ✓ Gemini measurements:")
+            logger.info(f"    Font: {measurements.get('font_size_mm', 'N/A'):.2f} mm ({measurements.get('font_size_pixels', 'N/A'):.0f} px)")
+            logger.info(f"    Line distance: {measurements.get('line_distance_mm', 'N/A'):.2f} mm ({measurements.get('line_distance_pixels', 'N/A'):.0f} px)")
+            logger.info(f"    Background: {measurements.get('background_color')} text")
+            logger.info(f"    Contrast: {measurements.get('contrast_assessment')}")
+            logger.info(f"    Confidence: {measurements.get('measurement_confidence', 0):.0%}")
+            
+            # LAYER 2: LOCAL DETERMINISTIC RULE CHECKS (100% reproducible)
+            rule_results = validate_measurements_against_rules(measurements, package_size_ml)
+            
+            # Log rule application for audit trail
+            logger.info(f"  ✓ Rule validation:")
+            logger.info(f"    Rule 1 (Font size): {rule_results['rule_1_font_size']['status']} - {rule_results['rule_1_font_size']['detail']}")
+            logger.info(f"    Rule 2 (Line distance): {rule_results['rule_2_line_distance']['status']} - {rule_results['rule_2_line_distance']['detail']}")
+            logger.info(f"    Rule 3 (Contrast): {rule_results['rule_3_background_contrast']['status']} - {rule_results['rule_3_background_contrast']['detail']}")
+            logger.info(f"    Overall: {rule_results['overall_compliance']}")
+            
+            return {
+                "measurements": measurements,
+                "rule_results": rule_results,
+                "overall_compliance": rule_results["overall_compliance"],
+                "compliance_confidence": measurements.get("measurement_confidence", 0)
+            }
             
         except Exception as e:
-            logger.warning(f"CLP validation failed for '{region['label']}': {e}")
-            return {}
+            logger.error(f"CLP validation failed for '{region_label}': {e}")
+            return {"error": str(e)}
     
     # ========================================================================
     # STAGE 4: CONVERT TO INTERNAL FORMAT & FILTER
