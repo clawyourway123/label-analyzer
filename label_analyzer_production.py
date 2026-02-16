@@ -1346,9 +1346,21 @@ If no measurement line is found, set measurement_line to null.
                 "confidence": region.get("confidence", 0.5),
                 "rect": new_rect if got_new_rect else rect,
                 "has_irregular_shape": response.get("has_irregular_shape", False),
-                "polygon_points": response.get("polygon_points"),
+                "polygon_points": None,  # Will denormalize below if present
                 "refinement_confidence": response.get("refinement_confidence", 0.8)
             }
+            
+            # CRITICAL: Denormalize polygon points from 0-1000 normalized to pixel coordinates
+            # (Stage 2 returns polygon_points in normalized 0-1000 space per schema)
+            if response.get("polygon_points"):
+                refined["polygon_points"] = [
+                    {
+                        "x": int(round(p["x"] / 1000 * img_w)),
+                        "y": int(round(p["y"] / 1000 * img_h))
+                    }
+                    for p in response["polygon_points"]
+                ]
+                logger.debug(f"  📐 Denormalized {len(refined['polygon_points'])} polygon points for '{label}'")
             
             out_rect = refined.get('rect', {})
             if out_rect:
