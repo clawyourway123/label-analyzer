@@ -1128,9 +1128,9 @@ If no measurement line is found, set measurement_line to null.
             logger.info(f"    Contrast: {measurements.get('contrast_assessment')}")
             logger.info(f"    Confidence: {meas_conf:.0%}")
             
-            # Check if measurements are valid (not all zeros/None)
-            if font_mm == 0 and line_dist_mm == 0 and meas_conf == 0:
-                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - all measurements are zero/None (skipping compliance check)")
+            # Check if measurements are valid (not all zeros/None) - skip if clearly unreadable
+            if (font_mm < 0.1 and line_dist_mm < 0.1) or meas_conf == 0:
+                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - measurements indicate no readable text (font={font_mm:.2f}mm, conf={meas_conf:.0%})")
                 return {
                     "measurements": measurements,
                     "rule_results": {},
