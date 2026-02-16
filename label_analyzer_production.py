@@ -788,9 +788,14 @@ class GeminiClient:
         Results are cached by (image_data, prompt, schema) so repeated
         calls for the same input return instantly without an API round-trip.
         """
+        import time as time_module
+        call_start = time_module.time()
+        
         # Check cache first
         cached = self.cache.get(image_data, prompt, response_schema)
         if cached is not None:
+            cache_hit_time = time_module.time() - call_start
+            logger.info(f"  ⚡ Cache HIT ({cache_hit_time:.2f}s)")
             return cached
 
         client = self._get_client()
@@ -800,12 +805,23 @@ class GeminiClient:
             config["response_mime_type"] = "application/json"
             config["response_json_schema"] = response_schema
 
+        # Log image size and prompt length
+        inline = image_data.get("inline_data", {})
+        img_bytes = len(inline.get("data", "")) * 3 / 4  # base64 decode size estimate
+        logger.debug(f"  📤 Sending to Gemini: image={img_bytes/1e6:.1f}MB, prompt={len(prompt)} chars, schema={'yes' if response_schema else 'no'}")
+
         def _call() -> str:
+            api_call_start = time_module.time()
+            logger.info(f"  🔄 Calling Gemini API...")
             response = client.models.generate_content(
                 model=self.model,
                 contents=[prompt, image_data],
                 config=config if config else None
             )
+            api_time = time_module.time() - api_call_start
+            response_len = len(response.text)
+            logger.info(f"  ✓ Gemini response received ({api_time:.1f}s, {response_len} chars)")
+            logger.debug(f"    Response preview: {response.text[:200]}")
             return response.text
 
         # Build retryable set dynamically so imports are optional.
@@ -829,6 +845,8 @@ class GeminiClient:
                 retryable_exceptions=tuple(retryable),
             )
             self.cache.put(image_data, prompt, text, response_schema)
+            total_time = time_module.time() - call_start
+            logger.info(f"  ⏱️  Total call time: {total_time:.1f}s")
             return text
         except APIError:
             raise
@@ -913,11 +931,16 @@ If no measurement line is found, set measurement_line to null.
         }
         
         try:
+            logger.debug(f"  📋 Calibration prompt length: {len(prompt)} chars")
             response_text = self.gemini.analyze_image(image_data, prompt, calibration_schema)
+            
+            logger.debug(f"  📥 Raw response: {response_text[:500]}")  # First 500 chars
             response = json.loads(response_text)
+            logger.debug(f"  ✓ Parsed JSON successfully")
             
             if response.get("measurement_line"):
                 line_data = response["measurement_line"]
+                logger.info(f"  🎯 Found measurement line: {line_data}")
                 line = MeasurementLine(
                     start_point=Point(**line_data["start_point"]),
                     end_point=Point(**line_data["end_point"]),
@@ -929,11 +952,16 @@ If no measurement line is found, set measurement_line to null.
                     logger.info(f"✓ Calibration successful: {self.calibration.true_dpi} DPI")
                     return True
             
-            logger.info(f"✗ No measurement line found, using default {self.original_dpi} DPI")
+            logger.info(f"✗ No measurement line found (response: {response}), using default {self.original_dpi} DPI")
             return False
             
+        except json.JSONDecodeError as e:
+            logger.warning(f"Calibration failed (JSON parse): {e}")
+            logger.warning(f"  Raw response was: {response_text[:200]}")
+            logger.warning(f"  Using default DPI: {self.original_dpi}")
+            return False
         except Exception as e:
-            logger.warning(f"Calibration failed: {e}, using default DPI")
+            logger.warning(f"Calibration failed: {type(e).__name__}: {e}, using default DPI")
             return False
     
     # ========================================================================
@@ -947,6 +975,8 @@ If no measurement line is found, set measurement_line to null.
         Returns:
             List of detected regions with classifications
         """
+        import time as time_module
+        stage_start = time_module.time()
         logger.info("Stage 1: Rough Part Detection")
         
         try:
@@ -958,7 +988,8 @@ If no measurement line is found, set measurement_line to null.
             response = json.loads(response_text)
             
             regions = response.get("regions", [])
-            logger.info(f"✓ Detected {len(regions)} regions")
+            elapsed = time_module.time() - stage_start
+            logger.info(f"✓ Detected {len(regions)} regions in {elapsed:.1f}s")
             
             for i, region in enumerate(regions):
                 logger.debug(f"  Region {i}: {region['classification']} - {region['label']} (conf: {region.get('confidence', 0):.2f})")
@@ -1032,10 +1063,12 @@ If no measurement line is found, set measurement_line to null.
         Only applies to CLP-classified regions.
         Returns: {measurements, rule_results, overall_compliance}
         """
+        import time as time_module
         if region["classification"] != "CLP":
             return {}  # Non-CLP regions don't need validation
         
         region_label = region['label']
+        val_start = time_module.time()
         logger.info(f"Stage 3: Measuring CLP metrics for '{region_label}'")
         
         try:
@@ -1047,9 +1080,13 @@ If no measurement line is found, set measurement_line to null.
             )
             
             # Convert cropped region to base64
+            import time as time_module
+            encode_start = time_module.time()
             buffered = BytesIO()
             cropped_image.save(buffered, format="JPEG")
             cropped_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            encode_time = time_module.time() - encode_start
+            logger.debug(f"  📸 Image encoding took {encode_time:.2f}s ({len(cropped_b64)/1e6:.1f}MB base64)")
             
             cropped_data = {
                 "data": cropped_b64,
@@ -1088,6 +1125,9 @@ If no measurement line is found, set measurement_line to null.
             logger.info(f"    Rule 3 (Contrast): {rule_results['rule_3_background_contrast']['status']} - {rule_results['rule_3_background_contrast']['detail']}")
             logger.info(f"    Overall: {rule_results['overall_compliance']}")
             
+            val_time = time_module.time() - val_start
+            logger.info(f"  ✓ Stage 3 complete for '{region_label}' ({val_time:.1f}s)")
+            
             return {
                 "measurements": measurements,
                 "rule_results": rule_results,
@@ -1096,7 +1136,8 @@ If no measurement line is found, set measurement_line to null.
             }
             
         except Exception as e:
-            logger.error(f"CLP validation failed for '{region_label}': {e}")
+            val_time = time_module.time() - val_start
+            logger.error(f"CLP validation failed for '{region_label}' after {val_time:.1f}s: {e}")
             return {"error": str(e)}
     
     # ========================================================================
