@@ -52,18 +52,62 @@ function tailFile(filePath, n = 30) {
 function readCronJobs() {
   const data = readJson(CRON_PATH);
   if (!data?.jobs) return [];
-  return data.jobs.map(j => ({
-    id: j.id,
-    name: j.name,
-    enabled: j.enabled,
-    model: j.payload?.model || 'default',
-    schedule: j.schedule?.kind === 'cron' ? j.schedule.expr : `every ${Math.round((j.schedule?.everyMs || 0) / 60000)}m`,
-    lastStatus: j.state?.lastStatus || 'pending',
-    lastError: j.state?.lastError || null,
-    lastDurationMs: j.state?.lastDurationMs || null,
-    consecutiveErrors: j.state?.consecutiveErrors || 0,
-    nextRunAt: j.state?.nextRunAtMs || null
-  }));
+
+  const sessIndex = readJson(path.join(SESSIONS_DIR, 'sessions.json')) || {};
+  const cronSessions = {};
+  for (const [key, val] of Object.entries(sessIndex)) {
+    if (key.includes(':cron:') && val.label) {
+      const jobName = val.label.replace(/^Cron:\s*/, '');
+      if (!cronSessions[jobName]) cronSessions[jobName] = [];
+      cronSessions[jobName].push({ key, model: val.model, sessionId: val.sessionId });
+    }
+  }
+
+  return data.jobs.map(j => {
+    const activity = [];
+    const sessions = cronSessions[j.name] || [];
+    for (const sess of sessions.slice(-1)) {
+      const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.jsonl') && !f.includes('.reset.'));
+      for (const file of files) {
+        try {
+          const fp = path.join(SESSIONS_DIR, file);
+          const stat = fs.statSync(fp);
+          if ((Date.now() - stat.mtimeMs) / 3600000 > 6) continue;
+          const lines = fs.readFileSync(fp, 'utf8').trim().split('\n');
+          const first = JSON.parse(lines[0]);
+          if (first.id !== sess.sessionId && !lines[0].includes(j.id)) continue;
+          for (const line of lines.slice(-20)) {
+            try {
+              const d = JSON.parse(line);
+              const msg = d.message || {};
+              if (msg.role === 'assistant' && msg.model !== 'delivery-mirror') {
+                const content = typeof msg.content === 'string' ? msg.content.slice(0, 80) : '';
+                activity.push({ type: 'response', model: msg.model, cost: msg.usage?.cost?.total || 0, ts: msg.timestamp || d.timestamp, preview: content });
+              } else if (msg.role === 'toolResult') {
+                activity.push({ type: 'tool', name: msg.name || msg.toolName || '?', ts: msg.timestamp || d.timestamp });
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    }
+
+    return {
+      id: j.id,
+      name: j.name,
+      enabled: j.enabled !== false,
+      model: j.payload?.model || 'default',
+      schedule: j.schedule?.kind === 'cron' ? j.schedule.expr : `every ${Math.round((j.schedule?.everyMs || 0) / 60000)}m`,
+      tz: j.schedule?.tz || 'UTC',
+      lastStatus: j.state?.lastStatus || 'pending',
+      lastError: j.state?.lastError || null,
+      lastDurationMs: j.state?.lastDurationMs || null,
+      lastRunAt: j.state?.lastRunAtMs || null,
+      nextRunAt: j.state?.nextRunAtMs || null,
+      consecutiveErrors: j.state?.consecutiveErrors || 0,
+      activity: activity.slice(-5)
+    };
+  });
 }
 
 function readSessionCosts() {
@@ -177,7 +221,7 @@ function readActivityFeed() {
     }
   } catch {}
 
-  const errLines = tailFile(ERR_LOG_PATH, 30);
+  const errLines = tailFile(ERR_LOG_PATH, 40);
   for (const line of errLines) {
     if (line.includes('error') || line.includes('fail') || line.includes('Error')) {
       const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.Z+-]+)/);
@@ -186,9 +230,34 @@ function readActivityFeed() {
     }
   }
 
-  feed.sort((a, b) => a.ts - b.ts);
+  const gwLines = tailFile(LOG_PATH, 40);
+  for (const line of gwLines) {
+    const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.Z+-]+)/);
+    if (!tsMatch) continue;
+    const ts = toEpochMs(tsMatch[1]);
+    const body = line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.Z+-]+\s*/, '');
+    if (body.includes('[heartbeat]')) {
+      feed.push({ kind: 'cron', message: body.slice(0, 100), ts });
+    } else if (body.includes('[cron]')) {
+      feed.push({ kind: 'cron', message: body.slice(0, 100), ts });
+    } else if (body.includes('[reload]')) {
+      feed.push({ kind: 'model_switch', message: body.slice(0, 100), ts });
+    } else if (body.includes('errorCode=UNAVAILABLE') || body.includes('models failed')) {
+      feed.push({ kind: 'error', message: body.replace(/.*errorMessage=/, '').slice(0, 120), ts });
+    }
+  }
 
-  return feed.slice(-60);
+  feed.sort((a, b) => b.ts - a.ts);
+
+  const deduped = [];
+  for (const item of feed) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.kind === item.kind && Math.abs(last.ts - item.ts) < 3000) continue;
+    deduped.push(item);
+  }
+
+  const cutoff = Date.now() - 4 * 3600000;
+  return deduped.filter(e => e.ts > cutoff).slice(0, 60);
 }
 
 function readQueuedEvents() {
@@ -331,6 +400,14 @@ app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 buildMetrics();
 connectToGateway();
+
+setInterval(() => {
+  if (metricsCache) {
+    metricsCache.activityFeed = readActivityFeed();
+    broadcastToClients({ type: 'metrics', data: metricsCache });
+  }
+}, 1000);
+
 setInterval(() => { buildMetrics(); broadcastToClients({ type: 'metrics', data: metricsCache }); }, 15000);
 
 server.listen(PORT, () => {

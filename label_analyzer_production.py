@@ -19,11 +19,14 @@ import base64
 import hashlib
 import logging
 import time
+import random
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Callable, TypeVar
 from pathlib import Path
 from io import BytesIO
+
+T = TypeVar("T")
 
 import fitz  # PyMuPDF
 from PIL import Image as PIL_Image, ImageDraw as PIL_ImageDraw
@@ -226,6 +229,86 @@ BOUNDARY_REFINEMENT_SCHEMA = {
 
 
 # ============================================================================
+# CUSTOM EXCEPTIONS
+# ============================================================================
+
+class LabelAnalyzerError(Exception):
+    """Base exception for label analyzer errors."""
+
+
+class APIError(LabelAnalyzerError):
+    """Raised when an API call fails after all retries."""
+
+    def __init__(self, message: str, attempts: int = 0, last_exception: Optional[Exception] = None):
+        self.attempts = attempts
+        self.last_exception = last_exception
+        super().__init__(message)
+
+
+class CalibrationError(LabelAnalyzerError):
+    """Raised when DPI calibration encounters an unrecoverable error."""
+
+
+class DetectionError(LabelAnalyzerError):
+    """Raised when region detection fails completely."""
+
+
+# ============================================================================
+# RETRY WITH EXPONENTIAL BACKOFF
+# ============================================================================
+
+def retry_with_backoff(
+    fn: Callable[..., T],
+    *args,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    jitter: bool = True,
+    retryable_exceptions: Tuple = (Exception,),
+    **kwargs,
+) -> T:
+    """Execute *fn* with exponential backoff on transient failures.
+
+    Args:
+        fn: Callable to execute.
+        max_retries: Maximum number of retry attempts (0 = no retries).
+        base_delay: Initial delay in seconds before the first retry.
+        max_delay: Cap on the delay between retries.
+        jitter: Add random jitter (±25 %) to prevent thundering herd.
+        retryable_exceptions: Tuple of exception types that trigger a retry.
+
+    Returns:
+        The return value of *fn*.
+
+    Raises:
+        APIError: If all retry attempts are exhausted.
+    """
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 2):  # attempt 1 = first try
+        try:
+            return fn(*args, **kwargs)
+        except retryable_exceptions as exc:
+            last_exc = exc
+            if attempt == max_retries + 1:
+                break  # exhausted
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            if jitter:
+                delay *= 1.0 + random.uniform(-0.25, 0.25)
+            logger.warning(
+                f"Attempt {attempt}/{max_retries + 1} failed: {exc!r} — "
+                f"retrying in {delay:.1f}s"
+            )
+            time.sleep(delay)
+
+    raise APIError(
+        f"All {max_retries + 1} attempts failed. Last error: {last_exc!r}",
+        attempts=max_retries + 1,
+        last_exception=last_exc,
+    )
+
+
+# ============================================================================
 # RESPONSE CACHE
 # ============================================================================
 
@@ -331,13 +414,17 @@ class ResponseCache:
 class GeminiClient:
     """Wrapper for Gemini API interactions"""
     
+    # Exceptions that are safe to retry (transient / rate-limit).
+    RETRYABLE_EXCEPTIONS: Tuple = ()  # populated lazily after import
+
     def __init__(self, project_id: str, model: str = "gemini-3-pro-preview", location: str = "global",
-                 cache: Optional[ResponseCache] = None):
+                 cache: Optional[ResponseCache] = None, max_retries: int = 3):
         self.project_id = project_id
         self.model = model
         self.location = location
         self._client = None
         self.cache = cache or ResponseCache()
+        self.max_retries = max_retries
     
     def _get_client(self):
         """Lazy-load Gemini client"""
@@ -368,18 +455,41 @@ class GeminiClient:
             config["response_mime_type"] = "application/json"
             config["response_json_schema"] = response_schema
 
-        try:
+        def _call() -> str:
             response = client.models.generate_content(
                 model=self.model,
                 contents=[prompt, image_data],
                 config=config if config else None
             )
-            text = response.text
+            return response.text
+
+        # Build retryable set dynamically so imports are optional.
+        retryable: list = [ConnectionError, TimeoutError, OSError]
+        try:
+            from google.api_core.exceptions import (
+                ServiceUnavailable, TooManyRequests, DeadlineExceeded,
+                InternalServerError,
+            )
+            retryable.extend([ServiceUnavailable, TooManyRequests,
+                              DeadlineExceeded, InternalServerError])
+        except ImportError:
+            pass
+
+        try:
+            text = retry_with_backoff(
+                _call,
+                max_retries=self.max_retries,
+                base_delay=2.0,
+                max_delay=60.0,
+                retryable_exceptions=tuple(retryable),
+            )
             self.cache.put(image_data, prompt, text, response_schema)
             return text
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
+        except APIError:
             raise
+        except Exception as e:
+            logger.error(f"Gemini API error (non-retryable): {e}")
+            raise APIError(f"Non-retryable API error: {e}", attempts=1, last_exception=e)
 
 
 # ============================================================================

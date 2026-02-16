@@ -6,8 +6,6 @@ function App() {
   const [status, setStatus] = useState('connecting');
   const wsRef = useRef(null);
   const retryRef = useRef(null);
-  const feedScrollRef = useRef(null);
-  const userScrolledUp = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -24,100 +22,63 @@ function App() {
     return () => { mounted = false; clearTimeout(retryRef.current); if (wsRef.current) wsRef.current.close(); };
   }, []);
 
-  useEffect(() => {
-    const el = feedScrollRef.current;
-    if (!el || userScrolledUp.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [metrics?.activityFeed]);
-
-  const handleFeedScroll = () => {
-    const el = feedScrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    userScrolledUp.current = !atBottom;
-  };
-
   const refresh = () => { if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ action: 'refresh' })); };
 
   const ago = (ts) => {
-    if (!ts) return '';
+    if (!ts) return '\u2014';
     const ms = typeof ts === 'number' ? ts : new Date(ts).getTime();
     const s = Math.floor((Date.now() - ms) / 1000);
-    if (s < 0) return 'just now';
+    if (s < 0) return 'now';
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ago`;
   };
 
   const timeStr = (ts) => {
-    if (!ts || ts === 0) return '';
+    if (!ts || ts === 0) return '\u2014';
     const d = new Date(ts);
-    if (isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+    if (isNaN(d.getTime())) return '\u2014';
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
   };
 
   const usd = (v) => v != null ? `$${v.toFixed(4)}` : '\u2014';
-  const statusColor = (s) => s === 'ready' ? 'var(--accent-primary)' : s === 'rate_limited' ? '#ffa500' : '#ef4444';
+  const dur = (ms) => { if (!ms) return '\u2014'; if (ms < 60000) return `${(ms/1000).toFixed(0)}s`; return `${(ms/60000).toFixed(1)}m`; };
 
-  const feedIcon = (kind) => {
-    switch (kind) {
-      case 'response': return '\u2190';
-      case 'user': return '\u2192';
-      case 'tool': return '\u2699';
-      case 'cache_prune': return '\u2702';
-      case 'model_switch': return '\u21C4';
-      case 'error': return '\u26A0';
-      case 'cron': return '\u23F0';
-      default: return '\u2022';
-    }
+  const statusBadge = (s) => {
+    if (s === 'ok' || s === 'success' || s === 'ready') return 'badge-ok';
+    if (s === 'error') return 'badge-err';
+    if (s === 'rate_limited') return 'badge-warn';
+    return 'badge-pending';
   };
 
-  const feedLabel = (item) => {
-    switch (item.kind) {
-      case 'response': return 'Response';
-      case 'user': return 'User Message';
-      case 'tool': return `Tool: ${item.name}`;
-      case 'cache_prune': return 'Cache Prune';
-      case 'model_switch': return 'Model Switch';
-      case 'error': return 'Error';
-      case 'cron': return 'Cron';
-      default: return item.kind;
-    }
-  };
+  const feedIcon = (k) => ({ response: '\u2190', user: '\u2192', tool: '\u2699', cache_prune: '\u2702', model_switch: '\u21C4', error: '\u26A0', cron: '\u23F0' }[k] || '\u2022');
+  const feedLabel = (item) => ({ response: 'Response', user: 'User Message', cache_prune: 'Cache Prune', model_switch: 'Model Switch', error: 'Error', cron: 'Cron' }[item.kind] || (item.kind === 'tool' ? `Tool: ${item.name}` : item.kind));
 
-  const renderFeedItem = (item, i) => {
-    const isError = item.kind === 'error';
-    return (
-      <div key={i} className={`feed-item${isError ? ' error-item' : ''}`}>
-        <div className={`feed-bar ${item.kind}`} />
-        <div className="feed-body">
-          <div className="feed-top">
-            <span className="feed-icon">{feedIcon(item.kind)}</span>
-            <span className="feed-label">{feedLabel(item)}</span>
-            <span className="feed-time">{timeStr(item.ts)}</span>
-          </div>
-          <div className="feed-detail">
-            {item.kind === 'response' && (
-              <>
-                <span className="model-tag">{item.model}</span>
-                <span className="provider-tag">{item.provider}</span>
-                {item.cost > 0 && <span className="cost-tag">${item.cost.toFixed(4)}</span>}
-              </>
-            )}
-            {item.kind === 'user' && item.preview}
-            {item.kind === 'tool' && <span className="provider-tag">{item.name}</span>}
-            {item.kind === 'error' && item.message}
-            {item.kind === 'cache_prune' && 'Context TTL cleanup'}
-            {item.kind === 'model_switch' && 'Model snapshot updated'}
-          </div>
+  const renderFeedItem = (item, i) => (
+    <div key={i} className={`feed-item${item.kind === 'error' ? ' error-item' : ''}`}>
+      <div className={`feed-bar ${item.kind}`} />
+      <div className="feed-body">
+        <div className="feed-top">
+          <span className="feed-icon">{feedIcon(item.kind)}</span>
+          <span className="feed-label">{feedLabel(item)}</span>
+          <span className="feed-time">{timeStr(item.ts)}</span>
+        </div>
+        <div className="feed-detail">
+          {item.kind === 'response' && <><span className="model-tag">{item.model}</span><span className="provider-tag">{item.provider}</span>{item.cost > 0 && <span className="cost-tag">${item.cost.toFixed(4)}</span>}</>}
+          {item.kind === 'user' && item.preview}
+          {item.kind === 'tool' && <span className="provider-tag">{item.name}</span>}
+          {item.kind === 'error' && item.message}
+          {item.kind === 'cache_prune' && 'Context TTL cleanup'}
+          {item.kind === 'model_switch' && (item.message || 'Model snapshot updated')}
+          {item.kind === 'cron' && (item.message || 'Cron event')}
         </div>
       </div>
-    );
-  };
+    </div>
+  );
 
   const feed = metrics?.activityFeed || [];
   const errorCount = feed.filter(f => f.kind === 'error').length;
+  const modelColor = (s) => s === 'ready' ? '#10a37f' : s === 'rate_limited' ? '#ffa500' : '#ef4444';
 
   return (
     <div className="app">
@@ -136,226 +97,127 @@ function App() {
       <div className="layout">
         <main className="main-content">
           {!metrics ? (
-            <div className="section"><p style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '3rem' }}>Connecting to OpenClaw gateway...</p></div>
+            <div className="section" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ color: 'var(--text-secondary)' }}>Connecting to OpenClaw...</span>
+            </div>
           ) : (
             <>
-              {/* Cost Overview */}
-              <div className="section overview">
-                <div className="section-title">Today's Cost</div>
-                <div className="stats-grid">
-                  <div className="stat-card">
-                    <div className="stat-label">Total Spend</div>
-                    <div className="stat-value">{usd(metrics.costs?.total)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Cache Reads</div>
-                    <div className="stat-value" style={{ color: 'var(--accent-blue)' }}>{usd(metrics.costs?.cacheRead)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Cache Writes</div>
-                    <div className="stat-value" style={{ fontSize: '1.5rem' }}>{usd(metrics.costs?.cacheWrite)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Output</div>
-                    <div className="stat-value" style={{ fontSize: '1.5rem' }}>{usd(metrics.costs?.output)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Input</div>
-                    <div className="stat-value" style={{ fontSize: '1.5rem' }}>{usd(metrics.costs?.input)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Messages Today</div>
-                    <div className="stat-value">{metrics.costs?.messages || 0}</div>
-                  </div>
+              {/* Cost Bar */}
+              <div className="section">
+                <div className="cost-bar">
+                  <div className="cost-item"><span className="cost-label">Spend</span><span className="cost-value">{usd(metrics.costs?.total)}</span></div>
+                  <div className="cost-item"><span className="cost-label">Cache Read</span><span className="cost-value secondary blue">{usd(metrics.costs?.cacheRead)}</span></div>
+                  <div className="cost-item"><span className="cost-label">Cache Write</span><span className="cost-value secondary">{usd(metrics.costs?.cacheWrite)}</span></div>
+                  <div className="cost-item"><span className="cost-label">Input</span><span className="cost-value secondary">{usd(metrics.costs?.input)}</span></div>
+                  <div className="cost-item"><span className="cost-label">Output</span><span className="cost-value secondary">{usd(metrics.costs?.output)}</span></div>
+                  <div className="cost-item"><span className="cost-label">Msgs</span><span className="cost-value secondary">{metrics.costs?.messages || 0}</span></div>
                 </div>
               </div>
 
-              {/* Overview Stats */}
+              {/* System + Models */}
               <div className="section">
                 <div className="section-title">System</div>
-                <div className="stats-grid">
-                  <div className="stat-card">
-                    <div className="stat-label">Primary Model</div>
-                    <div className="stat-value" style={{ fontSize: '1.2rem' }}>{metrics.config?.primary?.split('/').pop() || '\u2014'}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Fallbacks</div>
-                    <div className="stat-value" style={{ fontSize: '1rem' }}>{metrics.config?.fallbacks?.map(f => f.split('/').pop()).join(' \u2192 ') || 'none'}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Heartbeat</div>
-                    <div className="stat-value" style={{ fontSize: '1.2rem' }}>{metrics.heartbeat?.every || 'off'}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Sessions</div>
-                    <div className="stat-value">{metrics.sessions?.count || 0}</div>
-                  </div>
+                <div className="system-bar" style={{ marginBottom: '0.4rem' }}>
+                  <div className="sys-item"><span className="sys-label">Primary</span><span className="sys-value mono">{metrics.config?.primary?.split('/').pop()}</span></div>
+                  <div className="sys-item"><span className="sys-label">Fallbacks</span><span className="sys-value mono">{metrics.config?.fallbacks?.map(f => f.split('/').pop()).join(' \u2192 ')}</span></div>
+                  <div className="sys-item"><span className="sys-label">Heartbeat</span><span className="sys-value">{metrics.heartbeat?.every || 'off'}</span></div>
+                  <div className="sys-item"><span className="sys-label">Sessions</span><span className="sys-value">{metrics.sessions?.count || 0}</span></div>
+                  <div className="sys-item"><span className="sys-label">Concurrent</span><span className="sys-value">{metrics.config?.maxConcurrent || 1}</span></div>
+                  <div className="sys-item"><span className="sys-label">Pruning</span><span className="sys-value">{metrics.contextPruning?.mode} ({metrics.contextPruning?.ttl})</span></div>
+                </div>
+                <div className="models-row">
+                  {metrics.modelStatuses?.map((m, i) => (
+                    <div className="model-chip" key={i}>
+                      <div className="dot" style={{ background: modelColor(m.status) }} />
+                      <span className="name">{m.alias}</span>
+                      <span className="role">{m.id === metrics.config?.primary ? 'PRI' : metrics.config?.fallbacks?.includes(m.id) ? 'FB' : ''}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              {/* Model Status */}
-              <div className="section">
-                <div className="section-title">Model Status</div>
-                <div className="table-container">
-                  <table className="data-table">
-                    <thead><tr><th>Model</th><th>Alias</th><th>Status</th><th>Cache</th><th>Role</th></tr></thead>
-                    <tbody>
-                      {metrics.modelStatuses?.length > 0 ? metrics.modelStatuses.map((m, i) => (
-                        <tr key={i}>
-                          <td className="font-mono">{m.id}</td>
-                          <td className="font-medium">{m.alias}</td>
-                          <td>
-                            <span className="priority-badge" style={{ background: `${statusColor(m.status)}15`, color: statusColor(m.status), borderColor: statusColor(m.status) }}>
-                              {m.status === 'ready' ? '\u25CF Ready' : m.status === 'rate_limited' ? '\u26A0 Rate Limited' : `\u2717 ${m.status}`}
-                            </span>
-                          </td>
-                          <td>{metrics.agents?.models?.find(x => x.id === m.id)?.cacheRetention !== 'none' ? <span style={{ color: 'var(--accent-primary)' }}>{'\u2713'} long</span> : <span style={{ color: 'var(--text-secondary)' }}>off</span>}</td>
-                          <td>{m.id === metrics.config?.primary ? 'Primary' : metrics.config?.fallbacks?.includes(m.id) ? 'Fallback' : 'On-demand'}</td>
-                        </tr>
-                      )) : <tr><td colSpan="5" className="empty-state">No models</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Cron Jobs */}
-              <div className="section">
-                <div className="section-title">Cron Jobs ({metrics.cronJobs?.length || 0})</div>
-                <div className="table-container">
-                  <table className="data-table">
-                    <thead><tr><th>Name</th><th>Model</th><th>Schedule</th><th>Status</th><th>Errors</th><th>Next Run</th></tr></thead>
-                    <tbody>
-                      {metrics.cronJobs?.length > 0 ? metrics.cronJobs.map((j, i) => (
-                        <tr key={i}>
-                          <td className="font-medium">{j.name}</td>
-                          <td className="font-mono" style={{ fontSize: '0.75rem' }}>{j.model?.split('/').pop()}</td>
-                          <td className="font-mono">{j.schedule}</td>
-                          <td>
-                            <span className="priority-badge" style={{
-                              background: j.lastStatus === 'success' ? 'rgba(16,163,127,0.1)' : j.lastStatus === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(79,159,255,0.1)',
-                              color: j.lastStatus === 'success' ? 'var(--accent-primary)' : j.lastStatus === 'error' ? '#ef4444' : 'var(--accent-blue)',
-                              borderColor: j.lastStatus === 'success' ? 'var(--accent-primary)' : j.lastStatus === 'error' ? '#ef4444' : 'var(--accent-blue)'
-                            }}>
-                              {j.lastStatus || 'pending'}
-                            </span>
-                          </td>
-                          <td style={{ color: j.consecutiveErrors > 0 ? '#ef4444' : 'var(--text-secondary)' }}>
-                            {j.consecutiveErrors > 0 ? `${j.consecutiveErrors}x` : '\u2014'}
-                          </td>
-                          <td style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{j.nextRunAt ? ago(j.nextRunAt) : '\u2014'}</td>
-                        </tr>
-                      )) : <tr><td colSpan="6" className="empty-state">No cron jobs</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-                {metrics.cronJobs?.filter(j => j.lastError).map((j, i) => (
-                  <div key={i} style={{ marginTop: '0.75rem', padding: '0.75rem', background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '0.5rem' }}>
-                    <div className="font-medium" style={{ fontSize: '0.8rem', color: '#ef4444', marginBottom: '0.25rem' }}>{j.name}</div>
-                    <div className="font-mono" style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{j.lastError}</div>
-                  </div>
+              {/* Optimizations row */}
+              <div className="section" style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', padding: '0.35rem 0.75rem' }}>
+                {metrics.optimizations?.map((o, i) => (
+                  <span key={i} style={{ fontSize: '0.62rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                    <span style={{ color: 'var(--accent-primary)' }}>{'\u2713'}</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{o.name}</span>
+                    <span className="font-mono" style={{ fontSize: '0.58rem' }}>{o.impact}</span>
+                  </span>
+                ))}
+                {metrics.channels?.filter(c => c.enabled).map((ch, i) => (
+                  <span key={`ch-${i}`} style={{ fontSize: '0.62rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                    <span style={{ color: 'var(--accent-blue)' }}>{'\u25CF'}</span>
+                    <span style={{ color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{ch.name}</span>
+                  </span>
                 ))}
               </div>
 
-              {/* Queue */}
-              <div className="section">
-                <div className="section-title">Queue</div>
-                {metrics.queue?.length > 0 ? (
-                  <div className="table-container">
-                    <table className="data-table">
-                      <thead><tr><th>Event</th><th>Details</th></tr></thead>
-                      <tbody>{metrics.queue.map((q, i) => <tr key={i}><td className="font-medium">{q.type || 'event'}</td><td className="font-mono">{JSON.stringify(q)}</td></tr>)}</tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '1.5rem', fontStyle: 'italic' }}>Queue empty</p>
-                )}
-              </div>
-
-              {/* Optimizations + Config */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-                <div className="section">
-                  <div className="section-title">Optimizations</div>
-                  <div className="table-container">
-                    <table className="data-table">
-                      <thead><tr><th>Name</th><th>Status</th><th>Impact</th></tr></thead>
-                      <tbody>
-                        {metrics.optimizations?.map((o, i) => (
-                          <tr key={i}>
-                            <td className="font-medium">{o.name}</td>
-                            <td><span className="priority-badge" style={{ background: 'rgba(16,163,127,0.1)', color: 'var(--accent-primary)', borderColor: 'var(--accent-primary)' }}>{o.status}</span></td>
-                            <td className="font-mono">{o.impact}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="section">
-                  <div className="section-title">Config Limits</div>
-                  <div className="stats-grid" style={{ gridTemplateColumns: '1fr' }}>
-                    <div className="stat-card"><div className="stat-label">Bootstrap Max/File</div><div className="stat-value" style={{ fontSize: '1.5rem' }}>{(metrics.config?.bootstrapMaxChars || 20000).toLocaleString()}</div></div>
-                    <div className="stat-card"><div className="stat-label">Bootstrap Total Max</div><div className="stat-value" style={{ fontSize: '1.5rem' }}>{(metrics.config?.bootstrapTotalMaxChars || 24000).toLocaleString()}</div></div>
-                    <div className="stat-card"><div className="stat-label">Context Pruning</div><div className="stat-value" style={{ fontSize: '1.2rem' }}>{metrics.contextPruning?.mode} ({metrics.contextPruning?.ttl})</div></div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Channels */}
-              <div className="section">
-                <div className="section-title">Channels</div>
-                <div className="table-container">
-                  <table className="data-table">
-                    <thead><tr><th>Channel</th><th>Status</th><th>Stream Mode</th></tr></thead>
-                    <tbody>
-                      {metrics.channels?.map((ch, i) => (
-                        <tr key={i}>
-                          <td className="font-medium" style={{ textTransform: 'capitalize' }}>{ch.name}</td>
-                          <td><span className={`status-badge ${ch.enabled ? 'connected' : 'disconnected'}`}>{ch.enabled ? 'Active' : 'Disabled'}</span></td>
-                          <td className="font-mono">{ch.streamMode}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              {/* Cron Jobs - fills remaining space */}
+              <div className="cron-section">
+                <div className="section-title">Cron Jobs ({metrics.cronJobs?.length || 0})</div>
+                <div className="cron-grid">
+                  {metrics.cronJobs?.length > 0 ? metrics.cronJobs.map((j, i) => (
+                    <div className="cron-card" key={i}>
+                      <div className="cron-header">
+                        <span className="cron-name">{j.name}</span>
+                        <span className={`badge ${statusBadge(j.lastStatus)}`}>{j.lastStatus || 'pending'}</span>
+                      </div>
+                      <div className="cron-meta">
+                        <span>Model <span className="val">{j.model?.split('/').pop()}</span></span>
+                        <span>Schedule <span className="val">{j.schedule}</span></span>
+                        <span>Last <span className="val">{j.lastRunAt ? timeStr(j.lastRunAt) : '\u2014'}</span></span>
+                        <span>Next <span className="val">{j.nextRunAt ? timeStr(j.nextRunAt) : '\u2014'}</span></span>
+                        <span>Duration <span className="val">{dur(j.lastDurationMs)}</span></span>
+                        {j.consecutiveErrors > 0 && <span style={{ color: '#ef4444' }}>{j.consecutiveErrors}x errors</span>}
+                      </div>
+                      {j.activity?.length > 0 && (
+                        <div className="cron-activity">
+                          {j.activity.map((a, ai) => (
+                            <div className="cron-act-item" key={ai}>
+                              <span className="act-icon">{a.type === 'tool' ? '\u2699' : '\u2190'}</span>
+                              <span style={{ color: 'var(--text-secondary)', fontSize: '0.57rem', minWidth: '52px', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{timeStr(a.ts)}</span>
+                              {a.type === 'tool' ? (
+                                <span>Tool: <span className="act-model">{a.name}</span></span>
+                              ) : (
+                                <><span className="act-model">{a.model}</span>{a.cost > 0 && <span className="act-cost">${a.cost.toFixed(4)}</span>}{a.preview && <span style={{ marginLeft: '0.3rem', opacity: 0.7 }}>{a.preview.slice(0, 50)}</span>}</>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {j.lastError && <div className="cron-error">{j.lastError}</div>}
+                    </div>
+                  )) : (
+                    <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '1rem', fontStyle: 'italic', fontSize: '0.75rem' }}>No cron jobs</div>
+                  )}
                 </div>
               </div>
             </>
           )}
         </main>
 
-        {/* Activity Feed Sidebar */}
+        {/* Activity Feed Sidebar - UNCHANGED size/position */}
         <aside className="activity-sidebar">
           <div className="sidebar-header">
             <h2>Activity Feed</h2>
-            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-              {errorCount > 0 && (
-                <span className="sidebar-count" style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}>
-                  {errorCount} error{errorCount !== 1 ? 's' : ''}
-                </span>
-              )}
-              <span className="sidebar-count">{feed.length} events</span>
+            <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+              {errorCount > 0 && <span className="sidebar-count" style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}>{errorCount} err</span>}
+              <span className="sidebar-count">{feed.length}</span>
             </div>
           </div>
-          <div className="feed-scroll" ref={feedScrollRef} onScroll={handleFeedScroll}>
-            {feed.length > 0 ? (
-              <>
-                {feed.map((item, i) => renderFeedItem(item, i))}
-              </>
-            ) : (
-              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.85rem' }}>
-                No activity yet
-              </div>
+          <div className="feed-scroll">
+            {feed.length > 0 ? feed.map((item, i) => renderFeedItem(item, i)) : (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.8rem' }}>No activity yet</div>
             )}
           </div>
         </aside>
       </div>
 
-      <footer className="footer">
-        <div className="footer-content">
-          <span>Rivas Dashboard v1.0 &mdash; OpenClaw Monitor</span>
-          <span>Port {metrics?.gateway?.port || '18789'} &middot; {metrics?.gateway?.mode || 'local'} &middot; Updated {ago(metrics?.lastUpdate)}</span>
-        </div>
-      </footer>
+      <div className="footer">
+        <span>Rivas Dashboard &mdash; OpenClaw Monitor</span>
+        <span>Port {metrics?.gateway?.port || '18789'} &middot; {metrics?.gateway?.mode || 'local'} &middot; Updated {ago(metrics?.lastUpdate)}</span>
+      </div>
     </div>
   );
 }
