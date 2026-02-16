@@ -1065,12 +1065,18 @@ If no measurement line is found, set measurement_line to null.
             measurements = json.loads(response_text)
             
             # Log measurements for accuracy audit
+            font_mm = measurements.get('font_size_mm', 0) or 0
+            font_px = measurements.get('font_size_pixels', 0) or 0
+            line_dist_mm = measurements.get('line_distance_mm', 0) or 0
+            line_dist_px = measurements.get('line_distance_pixels', 0) or 0
+            meas_conf = measurements.get('measurement_confidence', 0) or 0
+            
             logger.info(f"  ✓ Gemini measurements:")
-            logger.info(f"    Font: {measurements.get('font_size_mm', 'N/A'):.2f} mm ({measurements.get('font_size_pixels', 'N/A'):.0f} px)")
-            logger.info(f"    Line distance: {measurements.get('line_distance_mm', 'N/A'):.2f} mm ({measurements.get('line_distance_pixels', 'N/A'):.0f} px)")
+            logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px)")
+            logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px)")
             logger.info(f"    Background: {measurements.get('background_color')} text")
             logger.info(f"    Contrast: {measurements.get('contrast_assessment')}")
-            logger.info(f"    Confidence: {measurements.get('measurement_confidence', 0):.0%}")
+            logger.info(f"    Confidence: {meas_conf:.0%}")
             
             # LAYER 2: LOCAL DETERMINISTIC RULE CHECKS (100% reproducible)
             rule_results = validate_measurements_against_rules(measurements, package_size_ml)
