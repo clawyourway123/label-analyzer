@@ -869,13 +869,51 @@ class LabelAnalyzer:
         logger.info("Stage 0: DPI Calibration")
         
         prompt = """
-        Identify a technical measurement line or ruler on this image that is labeled in 'mm'.
-        Return the start/end pixel coordinates and the numeric value.
-        If no measurement line found, return null.
-        """
+Identify a technical measurement line or ruler on this image that is labeled in 'mm'.
+The ruler should have clear pixel coordinates for start and end points, and a labeled numeric value in millimeters.
+
+Return the following:
+- start_point: {x, y} pixel coordinates of the line start
+- end_point: {x, y} pixel coordinates of the line end  
+- value_mm: The numeric value in mm labeled on the ruler
+- confidence: How confident you are (0.0 to 1.0)
+
+If no measurement line is found, set measurement_line to null.
+"""
+        
+        calibration_schema = {
+            "type": "object",
+            "properties": {
+                "measurement_line": {
+                    "type": "object",
+                    "properties": {
+                        "start_point": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "integer"},
+                                "y": {"type": "integer"}
+                            },
+                            "required": ["x", "y"]
+                        },
+                        "end_point": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "integer"},
+                                "y": {"type": "integer"}
+                            },
+                            "required": ["x", "y"]
+                        },
+                        "value_mm": {"type": "number"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "required": ["start_point", "end_point", "value_mm", "confidence"]
+                }
+            },
+            "required": ["measurement_line"]
+        }
         
         try:
-            response_text = self.gemini.analyze_image(image_data, prompt)
+            response_text = self.gemini.analyze_image(image_data, prompt, calibration_schema)
             response = json.loads(response_text)
             
             if response.get("measurement_line"):
@@ -883,7 +921,8 @@ class LabelAnalyzer:
                 line = MeasurementLine(
                     start_point=Point(**line_data["start_point"]),
                     end_point=Point(**line_data["end_point"]),
-                    value_mm=line_data["value_mm"]
+                    value_mm=line_data["value_mm"],
+                    confidence=line_data.get("confidence", 0.8)
                 )
                 
                 if self.calibration.update(line):
