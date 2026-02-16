@@ -1316,6 +1316,10 @@ If no measurement line is found, set measurement_line to null.
                 logger.warning(f"   - {p.label} (confidence: {p.compliance_check.get('measurement_confidence', 'N/A'):.0%})")
         logger.info("=" * 60)
         
+        # Auto-save visualization to Desktop
+        viz_path = str(Path.home() / "Desktop" / "label_analysis_visualization.jpg")
+        self.visualize(image, output_path=viz_path)
+        
         return self.detected_parts
     
     # ========================================================================
@@ -1424,14 +1428,62 @@ If no measurement line is found, set measurement_line to null.
                     "label": part.label,
                     "confidence": part.confidence,
                     "rect": asdict(part.rect),
-                    "has_polygon": part.polygon is not None
+                    "has_polygon": part.polygon is not None,
+                    "is_compliant": part.is_compliant(),
+                    "needs_review": part.needs_human_review()
                 }
                 for part in self.detected_parts
             ]
         }
     
-    def visualize(self, image: PIL_Image.Image) -> PIL_Image.Image:
-        """Draw detected regions on image"""
+    def export_results(self, output_dir: str) -> Dict[str, str]:
+        """Export analysis results (JSON, visualization, CSV) to directory
+        
+        Args:
+            output_dir: Directory to save files
+            
+        Returns:
+            Dict with paths to saved files
+        """
+        from pathlib import Path
+        import csv
+        
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        
+        files = {}
+        
+        # Save JSON results
+        json_path = out_path / "analysis_results.json"
+        with open(json_path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        files["json"] = str(json_path)
+        logger.info(f"✓ Results saved: {json_path}")
+        
+        # Save CSV (easy spreadsheet import)
+        csv_path = out_path / "analysis_results.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["label", "classification", "confidence", "compliant", "needs_review", "x_min", "y_min", "x_max", "y_max"])
+            writer.writeheader()
+            for part in self.detected_parts:
+                writer.writerow({
+                    "label": part.label,
+                    "classification": part.classification.value,
+                    "confidence": f"{part.confidence:.2%}",
+                    "compliant": part.is_compliant(),
+                    "needs_review": part.needs_human_review(),
+                    "x_min": part.rect.xmin,
+                    "y_min": part.rect.ymin,
+                    "x_max": part.rect.xmax,
+                    "y_max": part.rect.ymax
+                })
+        files["csv"] = str(csv_path)
+        logger.info(f"✓ CSV saved: {csv_path}")
+        
+        return files
+    
+    def visualize(self, image: PIL_Image.Image, output_path: Optional[str] = None) -> PIL_Image.Image:
+        """Draw detected regions on image and optionally save to file"""
         img_copy = image.copy()
         draw = PIL_ImageDraw.Draw(img_copy)
         
@@ -1459,6 +1511,11 @@ If no measurement line is found, set measurement_line to null.
             center_x, center_y = part.rect.center()
             text = f"{part.label}\n({part.confidence:.0%})"
             draw.text((center_x, center_y), text, fill=color)
+        
+        # Auto-save if path provided
+        if output_path:
+            img_copy.save(output_path)
+            logger.info(f"✓ Visualization saved: {output_path}")
         
         return img_copy
 
