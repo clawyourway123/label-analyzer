@@ -79,6 +79,143 @@ class Rectangle(BaseModel):
         return ((self.xmin + self.xmax) // 2, (self.ymin + self.ymax) // 2)
 
 
+class ConfidenceSignal(BaseModel):
+    """A single confidence signal from one scoring dimension."""
+    name: str
+    value: float = Field(ge=0.0, le=1.0)
+    weight: float = Field(default=1.0, ge=0.0)
+
+
+class EnsembleConfidence:
+    """Multi-signal ensemble confidence scorer for detected regions.
+
+    Combines independent confidence signals (model output, geometric
+    plausibility, cross-region consistency) into a single calibrated
+    score using weighted averaging with optional signal gating.
+
+    Signals:
+        - model_confidence: Raw confidence from the vision model.
+        - geometric_plausibility: How reasonable the region's shape/size is
+          relative to the full image (penalizes tiny or full-image regions).
+        - refinement_agreement: How much the refined bbox agrees with the
+          rough bbox (high IoU = both stages agree = more trustworthy).
+
+    Usage::
+
+        scorer = EnsembleConfidence()
+        score = scorer.score(
+            model_confidence=0.85,
+            rough_rect={"xmin": 10, "ymin": 10, "xmax": 200, "ymax": 200},
+            refined_rect={"xmin": 12, "ymin": 8, "xmax": 198, "ymax": 205},
+            image_width=1000,
+            image_height=800,
+        )
+    """
+
+    # Default weights (sum needn't be 1; they are normalised internally).
+    DEFAULT_WEIGHTS = {
+        "model_confidence": 2.0,
+        "geometric_plausibility": 1.0,
+        "refinement_agreement": 1.5,
+    }
+
+    # Regions smaller than this fraction of the image are suspect.
+    MIN_AREA_FRACTION = 0.005
+    # Regions larger than this fraction are suspect (probably whole-image).
+    MAX_AREA_FRACTION = 0.85
+
+    def __init__(self, weights: Optional[Dict[str, float]] = None):
+        self.weights = weights or dict(self.DEFAULT_WEIGHTS)
+
+    # ------------------------------------------------------------------
+    # Individual signal calculators
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _iou(a: Dict, b: Dict) -> float:
+        """Intersection-over-Union for two axis-aligned rectangles (dict form)."""
+        ix1 = max(a["xmin"], b["xmin"])
+        iy1 = max(a["ymin"], b["ymin"])
+        ix2 = min(a["xmax"], b["xmax"])
+        iy2 = min(a["ymax"], b["ymax"])
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area_a = max(1, (a["xmax"] - a["xmin"]) * (a["ymax"] - a["ymin"]))
+        area_b = max(1, (b["xmax"] - b["xmin"]) * (b["ymax"] - b["ymin"]))
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def geometric_plausibility(self, rect: Dict, image_width: int, image_height: int) -> float:
+        """Score how geometrically plausible a region is (0–1).
+
+        Penalises regions that are implausibly small or that cover almost the
+        entire image (likely a detection failure).
+        """
+        area = max(1, (rect["xmax"] - rect["xmin"]) * (rect["ymax"] - rect["ymin"]))
+        image_area = max(1, image_width * image_height)
+        frac = area / image_area
+
+        if frac < self.MIN_AREA_FRACTION:
+            # Very small — linearly ramp from 0 at 0% to 1 at threshold
+            return max(0.0, frac / self.MIN_AREA_FRACTION)
+        if frac > self.MAX_AREA_FRACTION:
+            # Covers almost everything — ramp down
+            return max(0.0, (1.0 - frac) / (1.0 - self.MAX_AREA_FRACTION))
+        return 1.0
+
+    def refinement_agreement(self, rough_rect: Optional[Dict], refined_rect: Dict) -> float:
+        """Score how well rough and refined detections agree (IoU).
+
+        If no rough rect is available, returns a neutral 0.5.
+        """
+        if rough_rect is None:
+            return 0.5
+        return self._iou(rough_rect, refined_rect)
+
+    # ------------------------------------------------------------------
+    # Main scorer
+    # ------------------------------------------------------------------
+
+    def score(
+        self,
+        model_confidence: float,
+        rough_rect: Optional[Dict],
+        refined_rect: Dict,
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[float, List[ConfidenceSignal]]:
+        """Compute ensemble confidence score.
+
+        Returns:
+            Tuple of (final_score, list_of_signals) so callers can inspect
+            which signals contributed and by how much.
+        """
+        signals = [
+            ConfidenceSignal(
+                name="model_confidence",
+                value=min(max(model_confidence, 0.0), 1.0),
+                weight=self.weights.get("model_confidence", 1.0),
+            ),
+            ConfidenceSignal(
+                name="geometric_plausibility",
+                value=self.geometric_plausibility(refined_rect, image_width, image_height),
+                weight=self.weights.get("geometric_plausibility", 1.0),
+            ),
+            ConfidenceSignal(
+                name="refinement_agreement",
+                value=self.refinement_agreement(rough_rect, refined_rect),
+                weight=self.weights.get("refinement_agreement", 1.0),
+            ),
+        ]
+
+        total_weight = sum(s.weight for s in signals)
+        if total_weight == 0:
+            return 0.0, signals
+
+        weighted_sum = sum(s.value * s.weight for s in signals)
+        final = weighted_sum / total_weight
+        return round(min(max(final, 0.0), 1.0), 4), signals
+
+
 class PartClassification(str, Enum):
     CLP = "CLP"
     NON_CLP = "NON-CLP"
@@ -499,12 +636,15 @@ class GeminiClient:
 class LabelAnalyzer:
     """Production-ready label analyzer with multi-stage detection"""
     
-    def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None):
+    def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None,
+                 confidence_weights: Optional[Dict[str, float]] = None):
         cache = ResponseCache(cache_dir=cache_dir)
         self.gemini = GeminiClient(project_id, cache=cache)
         self.original_dpi = dpi
         self.calibration = CalibrationResult(dpi)
         self.detected_parts: List[DetectedPart] = []
+        self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
+        self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
     
     # ========================================================================
     # STAGE 0: CALIBRATION
@@ -633,16 +773,26 @@ class LabelAnalyzer:
     # STAGE 3: CONVERT TO INTERNAL FORMAT & FILTER
     # ========================================================================
     
-    def _regions_to_detected_parts(self, regions: List[Dict]) -> List[DetectedPart]:
-        """Convert region dicts to DetectedPart objects"""
+    def _regions_to_detected_parts(self, regions: List[Dict], rough_regions: Optional[List[Dict]] = None) -> List[DetectedPart]:
+        """Convert region dicts to DetectedPart objects with ensemble scoring.
+
+        Args:
+            regions: Refined region dicts (post Stage 2).
+            rough_regions: Original rough region dicts (pre Stage 2) used to
+                compute refinement agreement. Matched by index.
+
+        Returns:
+            List of DetectedPart with ensemble-calibrated confidence scores.
+        """
         parts = []
-        
-        for region in regions:
+        img_w, img_h = self._image_size if self._image_size != (0, 0) else (1, 1)
+
+        for i, region in enumerate(regions):
             try:
                 classification = PartClassification(region["classification"])
             except ValueError:
                 classification = PartClassification.UNKNOWN
-            
+
             rect_dict = region["rect"]
             rect = Rectangle(
                 xmin=rect_dict["xmin"],
@@ -650,24 +800,42 @@ class LabelAnalyzer:
                 xmax=rect_dict["xmax"],
                 ymax=rect_dict["ymax"]
             )
-            
+
             polygon = None
             if region.get("polygon_points"):
                 polygon = Polygon(points=[Point(**p) for p in region["polygon_points"]])
-            
-            confidence = region.get("confidence", 0.5)
-            confidence = max(confidence, region.get("refinement_confidence", 0.5))
-            
+
+            # --- Ensemble confidence scoring ---
+            model_conf = max(
+                region.get("confidence", 0.5),
+                region.get("refinement_confidence", 0.5),
+            )
+            rough_rect = rough_regions[i]["rect"] if rough_regions and i < len(rough_regions) else None
+
+            confidence, signals = self.ensemble_scorer.score(
+                model_confidence=model_conf,
+                rough_rect=rough_rect,
+                refined_rect=rect_dict,
+                image_width=img_w,
+                image_height=img_h,
+            )
+
+            logger.debug(
+                f"  Ensemble [{region.get('label', '?')}]: "
+                + ", ".join(f"{s.name}={s.value:.2f}(w={s.weight})" for s in signals)
+                + f" → {confidence:.3f}"
+            )
+
             part = DetectedPart(
                 classification=classification,
                 label=region["label"],
                 rect=rect,
                 polygon=polygon,
                 confidence=confidence,
-                raw_response=region
+                raw_response={**region, "ensemble_signals": [s.model_dump() for s in signals]},
             )
             parts.append(part)
-        
+
         return parts
     
     def filter_low_confidence(self, parts: List[DetectedPart], threshold: float = 0.6) -> List[DetectedPart]:
@@ -695,6 +863,9 @@ class LabelAnalyzer:
         logger.info("Starting label analysis...")
         logger.info("=" * 60)
         
+        # Store image dimensions for ensemble scoring
+        self._image_size = (image.width, image.height)
+
         # Stage 0: Calibrate DPI
         self.calibrate_dpi(image, image_data)
         
@@ -712,9 +883,9 @@ class LabelAnalyzer:
             refined = self.refine_boundaries(image_data, region)
             refined_regions.append(refined)
         
-        # Stage 3: Convert & filter
-        logger.info("Stage 3: Filtering Low-Confidence Results")
-        self.detected_parts = self._regions_to_detected_parts(refined_regions)
+        # Stage 3: Convert & filter (with ensemble scoring)
+        logger.info("Stage 3: Ensemble Scoring & Filtering")
+        self.detected_parts = self._regions_to_detected_parts(refined_regions, rough_regions)
         self.detected_parts = self.filter_low_confidence(self.detected_parts, threshold=0.6)
         
         logger.info(f"=" * 60)
