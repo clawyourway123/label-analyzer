@@ -247,7 +247,12 @@ class DetectedPart:
             return True  # Non-CLP regions don't have strict compliance rules
         
         # Check overall_compliance from rule_results
-        return self.compliance_check.get("overall_compliance") == "PASS"
+        status = self.compliance_check.get("overall_compliance", "")
+        # SKIP means unreadable region - neither pass nor fail
+        if status == "SKIP":
+            return False  # Unreadable regions don't pass
+        
+        return status == "PASS"
     
     def needs_human_review(self, confidence_threshold: float = 0.85, margin_pct: float = 0.1) -> bool:
         """Flag for human review if uncertain or borderline.
@@ -1122,6 +1127,17 @@ If no measurement line is found, set measurement_line to null.
             logger.info(f"    Background: {measurements.get('background_color')} text")
             logger.info(f"    Contrast: {measurements.get('contrast_assessment')}")
             logger.info(f"    Confidence: {meas_conf:.0%}")
+            
+            # Check if measurements are valid (not all zeros/None)
+            if font_mm == 0 and line_dist_mm == 0 and meas_conf == 0:
+                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - all measurements are zero/None (skipping compliance check)")
+                return {
+                    "measurements": measurements,
+                    "rule_results": {},
+                    "overall_compliance": "SKIP",
+                    "compliance_confidence": 0,
+                    "error": "Region unreadable - no text detected"
+                }
             
             # LAYER 2: LOCAL DETERMINISTIC RULE CHECKS (100% reproducible)
             rule_results = validate_measurements_against_rules(measurements, package_size_ml)
