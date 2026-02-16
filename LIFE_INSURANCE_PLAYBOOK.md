@@ -8,42 +8,47 @@
 
 ## PHASE 1: FOUNDATION (Week 1-2)
 
-### Step 1: Choose Your State
+### Step 1: Texas License (You're in San Antonio - PERFECT)
 **ACTION TODAY:**
-- [ ] Decide: California, Texas, Florida, or New York? (Pick one - easiest to expand from)
-- [ ] Why: Determines licensing speed + regulatory complexity
+- [ ] You're in Texas - best choice for speed
+- [ ] Why: 15-hour pre-licensing (faster than CA), no waiting, huge market, easy renewals
 
-**Default:** California (fastest, largest market, ~20 hours pre-licensing)
+**Texas Advantage:** 
+- Faster approval (no CA backlog)
+- Massive Austin/Houston/Dallas growth = leads everywhere
+- $5k easily gets you operational in Texas
 
 ---
 
 ### Step 2: Get Licensed (1-3 weeks)
 **Exact Steps:**
 
-#### 2.1 Pre-Licensing Course (20 hours)
-- [ ] Go to: https://www.lytespeed.net/ or https://www.insuranceexam.org/
-- [ ] Pick California Life Insurance 20-hour course (~$100-150)
-- [ ] Schedule: Start Monday, complete by Friday
-- [ ] Time commitment: 2-3 hours/day
-- [ ] Cost: $120
+#### 2.1 Pre-Licensing Course (15 hours - Texas)
+- [ ] Go to: https://www.lytespeed.net/ (Texas option) or https://www.insuranceexam.org/
+- [ ] Pick: Texas Life Insurance 15-hour course (~$100-120)
+- [ ] Schedule: Start Monday, complete by Thursday (faster than CA)
+- [ ] Time commitment: 3-4 hours/day
+- [ ] Cost: $110
 
-#### 2.2 Take Licensing Exam
-- [ ] Register: California Department of Insurance (https://www.insurance.ca.gov/)
-- [ ] Exam fee: $240
-- [ ] Schedule: Prometric testing center (anywhere, same day results)
-- [ ] Pass rate: ~70% on first try with course
+#### 2.2 Take Licensing Exam (Texas TDIE)
+- [ ] Register: Texas Department of Insurance Examinations (TDIE)
+- [ ] Portal: https://www.tdi.texas.gov/
+- [ ] Exam fee: $165 (cheaper than CA)
+- [ ] Schedule: Prometric center (downtown San Antonio has one)
+- [ ] Pass rate: ~75% on first try with course
+- [ ] Same-day results
 - [ ] You'll pass.
 
-#### 2.3 Background Check & License Approval
-- [ ] Submit: Background check (clean background = auto-approve)
-- [ ] Cost: $50-75
-- [ ] Wait: 5-7 business days
-- [ ] Arrive: Physical license in mail
+#### 2.3 License Approval (Fastest Path)
+- [ ] Background check: $0 (bundled with exam)
+- [ ] Wait: 3-5 business days (faster than CA)
+- [ ] Fingerprints: Needed - go to local police station (30 min)
+- [ ] License: Digital approval in TDI portal, physical arrives in ~1 week
 
-**Total for licensing:**
-- Time: 2-3 weeks
-- Cost: ~$410-465
-- Outcome: Active Life Insurance Agent License
+**Total for licensing (Texas):**
+- Time: 2 weeks (faster than CA)
+- Cost: ~$275 (cheaper than CA)
+- Outcome: Active Texas Life Insurance Agent License
 
 ---
 
@@ -86,14 +91,16 @@
 - [ ] Landing page: Carrd ($12/yr) or WordPress free
 - [ ] **Total: ~$60-75/month**
 
-### Step 5: E&O Insurance (Errors & Omissions)
+### Step 5: E&O Insurance (Errors & Omissions) - Texas
 **Critical - carriers require this**
-- [ ] Provider: The Hartford, ProAssurance, or PSA
-- [ ] Cost: $400-600/year (~$50/month)
+- [ ] Provider: The Hartford, PSA, or ProAssurance (all serve Texas)
+- [ ] Cost: $350-500/year (~$40/month in Texas)
 - [ ] Why: Protects you from liability claims
 - [ ] Approval: 1-2 days once licensed
+- [ ] Texas Tip: Many carriers bundle E&O with appointment
 
-**Total so far: ~$900 (licensing + E&O) = 18% of your $5k capital**
+**Total so far: ~$625 (licensing + E&O in Texas) = 12.5% of your $5k capital**
+**You're saving ~$300 vs California**
 
 ---
 
@@ -184,11 +191,12 @@ By month 6, your portfolio looks like:
 
 ## CHECKLIST - DO THIS WEEK
 
-### Days 1-3:
-- [ ] Pick your state (default: California)
+### Days 1-3 (SAN ANTONIO, TEXAS):
+- [ ] Go to: https://www.lytespeed.net/ (pick Texas Life Insurance 15-hour)
 - [ ] Enroll in pre-licensing course
-- [ ] Set up Pipedrive (free)
-- [ ] Cost: ~$120
+- [ ] Set up Pipedrive (free) - https://www.pipedrive.com/
+- [ ] Cost: $110
+- [ ] Bookmark: https://www.tdi.texas.gov/ (Texas DI)
 
 ### Days 4-7:
 - [ ] Complete 20-hour course
@@ -196,11 +204,12 @@ By month 6, your portfolio looks like:
 - [ ] Schedule exam (Prometric center)
 - [ ] Create LinkedIn post: "Becoming a Life Insurance Agent"
 
-### Week 2:
-- [ ] Take & pass exam
-- [ ] Apply for 5 company appointments
-- [ ] Get E&O insurance quote
-- [ ] Start calling people in your network
+### Week 2 (TEXAS TIMELINE):
+- [ ] Complete 15-hour course (done by Thursday)
+- [ ] Register for exam at TDI: https://www.tdi.texas.gov/
+- [ ] Schedule exam at Prometric (San Antonio location): https://www.prometric.com/
+- [ ] Get E&O insurance quote (call or apply online)
+- [ ] Start calling people in your network (prep your pitch)
 
 ### Week 3:
 - [ ] License arrives
@@ -214,18 +223,19 @@ By month 6, your portfolio looks like:
 
 | Cost | Timing | Amount |
 |------|--------|--------|
-| Pre-licensing course | Week 1 | $120 |
-| Licensing exam | Week 1 | $240 |
-| Background check | Week 2 | $75 |
-| E&O insurance (annual) | Week 3 | $500 |
+| Pre-licensing course (TEXAS) | Week 1 | $110 |
+| Licensing exam (TEXAS) | Week 1 | $165 |
+| Fingerprints (local) | Week 2 | $0-20 |
+| E&O insurance (annual) | Week 3 | $400 |
 | CRM + email | Ongoing | $60/mo |
 | SMS service | Ongoing | $50/mo |
-| **Total startup** | **By week 3** | **~$935** |
+| **Total startup** | **By week 3** | **~$675** |
 | **Monthly operating** | **Ongoing** | **~$110** |
 
-**Your $5k capital:**
-- Week 3: Spend $935 (18% used)
-- Week 4+: $4,065 remaining for living expenses while building
+**Your $5k capital (TEXAS ADVANTAGE):**
+- Week 3: Spend only $675 (13.5% used) - save $260 vs California
+- Week 4+: $4,325 remaining for living expenses while building
+- **Result: More runway, same timeline**
 
 **By month 3:**
 - Break-even (operations cost covered by commissions)
@@ -261,20 +271,30 @@ By Friday: Exam ready
 By next Thursday: Licensed
 By end of month 2: First clients paying you
 
-**Your 6-month timeline:**
-- Month 1: Get licensed, build pipeline
+**Your 6-month TEXAS timeline (faster):**
+- Week 1-2: Enroll + complete course
+- Week 2-3: Pass exam + get licensed
+- Month 1: Licensed, building pipeline
 - Month 2: 10-15 clients, $500-1000 commission
 - Month 3: 30-40 clients, $1500-2000 commission
-- Month 4: 60-80 clients, $2500-3500 commission (break-even)
+- Month 4: 60-80 clients, $2500-3500 commission (break-even + profit)
 - Month 5: 100-120 clients, $4000-5000 commission
 - Month 6: Recurring + new = $5000-8000/month, way past your 5k goal
 
 ---
 
-## Questions?
+## MONDAY MORNING (San Antonio)
 
-No. No questions. Move.
+1. Open: https://www.lytespeed.net/
+2. Pick: Texas Life Insurance 15-hour
+3. Pay: $110
+4. Enroll + start
+5. Done.
 
-Monday: Enroll.
+By Thursday: Course complete
+By Friday/Monday: Take exam at Prometric
+By week 3: Licensed + earning
 
-Go.
+No questions. No overthinking.
+
+Just go. 🚀
