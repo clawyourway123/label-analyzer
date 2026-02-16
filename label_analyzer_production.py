@@ -248,6 +248,39 @@ class DetectedPart:
         
         # Check overall_compliance from rule_results
         return self.compliance_check.get("overall_compliance") == "PASS"
+    
+    def needs_human_review(self, confidence_threshold: float = 0.85, margin_pct: float = 0.1) -> bool:
+        """Flag for human review if uncertain or borderline.
+        
+        Args:
+            confidence_threshold: Flag if measurement_confidence < this
+            margin_pct: Flag if result is within this % of compliance threshold
+        
+        Returns:
+            True if human review recommended
+        """
+        if not self.compliance_check or self.classification != PartClassification.CLP:
+            return False
+        
+        # Low confidence measurements
+        if self.compliance_check.get("measurement_confidence", 1.0) < confidence_threshold:
+            return True
+        
+        # Borderline results (within margin of threshold)
+        rule_results = self.compliance_check.get("rule_results", {})
+        
+        # Check if any rule is borderline
+        for rule_key in ["rule_1_font_size", "rule_2_line_distance", "rule_3_background_contrast"]:
+            rule = rule_results.get(rule_key, {})
+            if rule.get("status") in ["PASS", "FAIL"]:
+                measured = rule.get("measured_mm", 0)
+                threshold = rule.get("threshold_mm", 1)
+                if threshold > 0:
+                    pct_diff = abs(measured - threshold) / threshold
+                    if pct_diff < margin_pct:
+                        return True
+        
+        return False
 
 
 @dataclass
@@ -1162,14 +1195,19 @@ class LabelAnalyzer:
         
         self.detected_parts = self.filter_low_confidence(self.detected_parts, threshold=0.6)
         
-        # Log compliance summary
+        # Log compliance summary with human review flags
         clp_parts = [p for p in self.detected_parts if p.classification == PartClassification.CLP]
         compliant_parts = [p for p in clp_parts if p.is_compliant()]
         non_compliant = len(clp_parts) - len(compliant_parts)
+        review_flagged = [p for p in clp_parts if p.needs_human_review()]
         
         logger.info(f"=" * 60)
         logger.info(f"Analysis complete: {len(self.detected_parts)} confident regions detected")
         logger.info(f"CLP regions: {len(clp_parts)} total, {len(compliant_parts)} compliant, {non_compliant} non-compliant")
+        if review_flagged:
+            logger.warning(f"⚠️  HUMAN REVIEW NEEDED: {len(review_flagged)} regions flagged (low confidence or borderline)")
+            for p in review_flagged:
+                logger.warning(f"   - {p.label} (confidence: {p.compliance_check.get('measurement_confidence', 'N/A'):.0%})")
         logger.info("=" * 60)
         
         return self.detected_parts
