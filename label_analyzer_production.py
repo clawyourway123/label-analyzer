@@ -231,11 +231,26 @@ class DetectedPart:
     rect: Rectangle
     polygon: Optional[Polygon] = None
     confidence: float = 0.0  # 0.0 to 1.0
+    content_type: Optional[str] = None  # e.g., "Ingredients", "Hazard Symbols"
     raw_response: Optional[Dict] = None
+    compliance_check: Optional[Dict] = None  # CLP validation results
     
     def is_confident(self, threshold: float = 0.7) -> bool:
         """Check if detection meets confidence threshold"""
         return self.confidence >= threshold
+    
+    def is_compliant(self) -> bool:
+        """Check if CLP region passes all compliance checks"""
+        if not self.compliance_check:
+            return False
+        if self.classification != PartClassification.CLP:
+            return True  # Non-CLP regions don't have strict compliance rules
+        
+        return (
+            self.compliance_check.get("font_size_compliance") == "PASS" and
+            self.compliance_check.get("line_distance_compliance") == "PASS" and
+            self.compliance_check.get("background_contrast_compliance") == "PASS"
+        )
 
 
 @dataclass
@@ -297,14 +312,29 @@ class CalibrationResult:
 # ============================================================================
 
 PROMPT_ROUGH_DETECTION = """
-You are analyzing a product label image to identify regions containing:
-- **CLP Parts**: Ingredients lists, hazard symbols, warnings sections
-- **Non-CLP Parts**: Marketing text, usage instructions, brand information
+You are analyzing a product label image to identify regions containing CLP or Non-CLP sections.
+
+**CLP Parts** (strict compliance sections):
+- Ingredients list (INCI notation)
+- Hazard symbols (GHS pictograms, warning signs)
+- Warnings section (mandatory precautions, first aid)
+- Signal word (DANGER, WARNING, CAUTION)
+- Hazard statements (H-statements)
+- Precautionary statements (P-statements)
+
+**Non-CLP Parts** (marketing/informational):
+- Brand name and logo
+- Marketing claims ("hypoallergenic", "natural", etc.)
+- Usage instructions
+- Directions for use
+- Contact information
+- Barcode/UPC
+- Volume/weight declarations
 
 Task: Identify ALL distinct regions on this label, even if they overlap or have irregular shapes.
 For each region, provide:
-1. A clear classification (CLP or NON-CLP)
-2. A descriptive label (e.g., "Hazard Symbols", "Instructions for Use")
+1. A clear classification (CLP or NON-CLP) based on CONTENT
+2. A descriptive label (e.g., "Hazard Symbols", "Ingredients List", "Usage Instructions")
 3. Approximate bounding rectangle
 4. Your confidence level (0.0-1.0)
 
@@ -322,6 +352,7 @@ ROUGH_DETECTION_SCHEMA = {
                 "properties": {
                     "classification": {"type": "string", "enum": ["CLP", "NON-CLP"]},
                     "label": {"type": "string"},
+                    "content_type": {"type": "string", "description": "Specific section type (e.g., 'Ingredients', 'Hazard Symbols', 'Usage Instructions')"},
                     "rect": {
                         "type": "object",
                         "properties": {
@@ -334,7 +365,7 @@ ROUGH_DETECTION_SCHEMA = {
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1}
                 },
-                "required": ["classification", "label", "rect", "confidence"]
+                "required": ["classification", "label", "content_type", "rect", "confidence"]
             }
         }
     },
@@ -350,6 +381,7 @@ PROMPT_BOUNDARY_REFINEMENT = """
 You previously identified a region on this label as:
 - Classification: {classification}
 - Label: {label}
+- Content Type: {content_type}
 - Approximate bounding box: [{xmin}, {ymin}] to [{xmax}, {ymax}]
 
 Now, refine the boundaries by identifying the exact pixel coordinates that form the border of this region.
@@ -385,6 +417,59 @@ BOUNDARY_REFINEMENT_SCHEMA = {
         },
         "refinement_confidence": {"type": "number", "minimum": 0, "maximum": 1}
     }
+}
+
+
+# ============================================================================
+# DETECTION STAGE 3: CLP COMPLIANCE VALIDATION
+# ============================================================================
+
+def get_clp_validation_prompt(true_dpi: int, dpmm: float) -> str:
+    """Generate CLP validation prompt with DPI-adjusted pixel thresholds."""
+    min_px_small = 1.2 * dpmm    # 1.2 mm @ true DPI
+    min_px_medium = 1.4 * dpmm   # 1.4 mm @ true DPI
+    min_px_large = 1.8 * dpmm    # 1.8 mm @ true DPI
+    
+    return f"""
+You are validating CLP compliance for a product label section.
+
+### **Reference Scale:**
+The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm). Use this to verify font sizes and spacing.
+
+### **Rules for CLP-related parts:**
+
+**1. Font-size requirement (minimum physical size):**
+- Packaging ≤ 500 ml → **≥ 7.03 points (1.2 mm or ~{min_px_small:.0f} pixels)**
+- Packaging > 500 ml and ≤ 3000 ml → **≥ 8.20 points (1.4 mm or ~{min_px_medium:.0f} pixels)**
+- Packaging > 3000 ml → **≥ 10.50 points (1.8 mm or ~{min_px_large:.0f} pixels)**
+- For inner packaging ≤ 10 ml → may be smaller, but must remain easily legible.
+
+**2. Line-distance rule:**
+Distance between two lines must be **≥ 120% of the font size**.
+
+**3. Background rule:**
+Background of all CLP text must be **white with black font** (or high contrast equivalent).
+
+Analyze the region and report:
+1. Whether it complies with each rule (PASS/FAIL/UNCLEAR)
+2. Estimated font size in pixels and mm
+3. Any violations found
+4. Confidence level in your assessment
+"""
+
+CLP_VALIDATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "font_size_pixels": {"type": "number", "description": "Estimated font size in pixels"},
+        "font_size_mm": {"type": "number", "description": "Estimated font size in mm"},
+        "font_size_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"], "description": "Whether font meets minimum size"},
+        "line_distance_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"]},
+        "background_contrast_compliance": {"type": "string", "enum": ["PASS", "FAIL", "UNCLEAR"]},
+        "violations": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "string"},
+        "compliance_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+    },
+    "required": ["font_size_pixels", "font_size_mm", "font_size_compliance", "line_distance_compliance", "background_contrast_compliance", "violations", "compliance_confidence"]
 }
 
 
@@ -758,11 +843,13 @@ class LabelAnalyzer:
         """
         classification = region["classification"]
         label = region["label"]
+        content_type = region.get("content_type", "Unknown")
         rect = region["rect"]
         
         prompt = PROMPT_BOUNDARY_REFINEMENT.format(
             classification=classification,
             label=label,
+            content_type=content_type,
             xmin=rect["xmin"],
             ymin=rect["ymin"],
             xmax=rect["xmax"],
@@ -793,7 +880,57 @@ class LabelAnalyzer:
             return region
     
     # ========================================================================
-    # STAGE 3: CONVERT TO INTERNAL FORMAT & FILTER
+    # STAGE 3: CLP COMPLIANCE VALIDATION
+    # ========================================================================
+    
+    def validate_clp_compliance(self, image_data: Dict, region: Dict, cropped_image: PIL_Image.Image) -> Dict:
+        """
+        Stage 3: Validate CLP regions against compliance rules
+        
+        Only applies to CLP-classified regions.
+        Returns compliance check results.
+        """
+        if region["classification"] != "CLP":
+            return {}  # Non-CLP regions don't need validation
+        
+        logger.info(f"Stage 3: Validating CLP compliance for '{region['label']}'")
+        
+        try:
+            # Get validation prompt with DPI-adjusted thresholds
+            validation_prompt = get_clp_validation_prompt(
+                self.calibration.true_dpi,
+                self.calibration.dpmm
+            )
+            
+            # Convert cropped region to base64
+            buffered = BytesIO()
+            cropped_image.save(buffered, format="JPEG")
+            cropped_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            
+            cropped_data = {
+                "data": cropped_b64,
+                "mime_type": "image/jpeg"
+            }
+            
+            response_text = self.gemini.analyze_image(
+                cropped_data,
+                validation_prompt,
+                CLP_VALIDATION_SCHEMA
+            )
+            
+            compliance = json.loads(response_text)
+            logger.info(f"  Font size: {compliance.get('font_size_mm', 'N/A'):.2f} mm")
+            logger.info(f"  Font compliance: {compliance.get('font_size_compliance', 'UNCLEAR')}")
+            logger.info(f"  Violations: {len(compliance.get('violations', []))}")
+            
+            return compliance
+            
+        except Exception as e:
+            logger.warning(f"CLP validation failed for '{region['label']}': {e}")
+            return {}
+    
+    # ========================================================================
+    # STAGE 4: CONVERT TO INTERNAL FORMAT & FILTER
     # ========================================================================
     
     def _regions_to_detected_parts(self, regions: List[Dict], rough_regions: Optional[List[Dict]] = None) -> List[DetectedPart]:
@@ -852,6 +989,7 @@ class LabelAnalyzer:
             part = DetectedPart(
                 classification=classification,
                 label=region["label"],
+                content_type=region.get("content_type", "Unknown"),
                 rect=rect,
                 polygon=polygon,
                 confidence=confidence,
@@ -877,7 +1015,7 @@ class LabelAnalyzer:
     
     def analyze(self, image: PIL_Image.Image, image_data: Dict) -> List[DetectedPart]:
         """
-        Main analysis pipeline: calibrate → detect rough → refine → filter
+        Main analysis pipeline: calibrate → detect rough → refine → validate CLP → filter
         
         Returns:
             List of detected parts with high confidence
@@ -906,13 +1044,40 @@ class LabelAnalyzer:
             refined = self.refine_boundaries(image_data, region)
             refined_regions.append(refined)
         
-        # Stage 3: Convert & filter (with ensemble scoring)
-        logger.info("Stage 3: Ensemble Scoring & Filtering")
+        # Stage 3: CLP Compliance Validation (for CLP regions only)
+        logger.info("Stage 3: CLP Compliance Validation")
+        for i, region in enumerate(refined_regions):
+            if region["classification"] == "CLP":
+                # Crop the region for closer analysis
+                rect = region["rect"]
+                cropped = image.crop((
+                    rect["xmin"],
+                    rect["ymin"],
+                    rect["xmax"],
+                    rect["ymax"]
+                ))
+                compliance = self.validate_clp_compliance(image_data, region, cropped)
+                region["compliance_check"] = compliance
+        
+        # Stage 4: Convert & filter (with ensemble scoring)
+        logger.info("Stage 4: Ensemble Scoring & Filtering")
         self.detected_parts = self._regions_to_detected_parts(refined_regions, rough_regions)
+        
+        # Add compliance data to DetectedPart objects
+        for i, part in enumerate(self.detected_parts):
+            if i < len(refined_regions):
+                part.compliance_check = refined_regions[i].get("compliance_check")
+        
         self.detected_parts = self.filter_low_confidence(self.detected_parts, threshold=0.6)
+        
+        # Log compliance summary
+        clp_parts = [p for p in self.detected_parts if p.classification == PartClassification.CLP]
+        compliant_parts = [p for p in clp_parts if p.is_compliant()]
+        non_compliant = len(clp_parts) - len(compliant_parts)
         
         logger.info(f"=" * 60)
         logger.info(f"Analysis complete: {len(self.detected_parts)} confident regions detected")
+        logger.info(f"CLP regions: {len(clp_parts)} total, {len(compliant_parts)} compliant, {non_compliant} non-compliant")
         logger.info("=" * 60)
         
         return self.detected_parts
