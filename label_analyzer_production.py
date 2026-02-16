@@ -903,28 +903,33 @@ If no measurement line is found, set measurement_line to null.
             "type": "object",
             "properties": {
                 "measurement_line": {
-                    "type": "object",
-                    "properties": {
-                        "start_point": {
+                    "anyOf": [
+                        {
                             "type": "object",
                             "properties": {
-                                "x": {"type": "integer"},
-                                "y": {"type": "integer"}
+                                "start_point": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"}
+                                    },
+                                    "required": ["x", "y"]
+                                },
+                                "end_point": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"}
+                                    },
+                                    "required": ["x", "y"]
+                                },
+                                "value_mm": {"type": "number"},
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
                             },
-                            "required": ["x", "y"]
+                            "required": ["start_point", "end_point", "value_mm", "confidence"]
                         },
-                        "end_point": {
-                            "type": "object",
-                            "properties": {
-                                "x": {"type": "integer"},
-                                "y": {"type": "integer"}
-                            },
-                            "required": ["x", "y"]
-                        },
-                        "value_mm": {"type": "number"},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
-                    },
-                    "required": ["start_point", "end_point", "value_mm", "confidence"]
+                        {"type": "null"}
+                    ]
                 }
             },
             "required": ["measurement_line"]
@@ -1247,13 +1252,25 @@ If no measurement line is found, set measurement_line to null.
             logger.warning("No regions detected in Stage 1")
             return []
         
-        # Stage 2: Refine boundaries
-        logger.info("Stage 2: Boundary Refinement")
+        # Stage 2: Refine boundaries (only for CLP regions to save time)
+        import time as time_module
+        stage2_start = time_module.time()
+        logger.info("Stage 2: Boundary Refinement (CLP regions only)")
         refined_regions = []
+        clp_count = sum(1 for r in rough_regions if r["classification"] == "CLP")
+        
         for i, region in enumerate(rough_regions):
-            logger.debug(f"  Refining region {i + 1}/{len(rough_regions)}...")
-            refined = self.refine_boundaries(image_data, region)
-            refined_regions.append(refined)
+            if region["classification"] == "CLP":
+                logger.debug(f"  Refining CLP region {i + 1}/{len(rough_regions)}...")
+                refined = self.refine_boundaries(image_data, region)
+                refined_regions.append(refined)
+            else:
+                # Skip refinement for non-CLP to save API calls
+                logger.debug(f"  Skipping refinement for NON-CLP region {i + 1}/{len(rough_regions)}")
+                refined_regions.append(region)
+        
+        stage2_time = time_module.time() - stage2_start
+        logger.info(f"Stage 2 complete: refined {clp_count} CLP regions in {stage2_time:.1f}s")
         
         # Stage 3: CLP Compliance Validation (for CLP regions only)
         logger.info("Stage 3: CLP Compliance Validation")
