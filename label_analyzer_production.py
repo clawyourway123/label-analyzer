@@ -1933,12 +1933,21 @@ If no measurement line is found, set measurement_line to null.
             try:
                 if path.lower().endswith(".pdf"):
                     img, _ = pdf_to_image(path, dpi=dpi)
+                    image_dpi = dpi  # Use specified DPI for PDFs
                 else:
                     img = PIL_Image.open(path)
+                    # Extract DPI from image metadata if available
+                    image_dpi = dpi  # Default
+                    if hasattr(img, 'info') and 'dpi' in img.info:
+                        dpi_tuple = img.info['dpi']
+                        if isinstance(dpi_tuple, (tuple, list)) and len(dpi_tuple) >= 1:
+                            image_dpi = int(dpi_tuple[0])
+                        elif isinstance(dpi_tuple, (int, float)):
+                            image_dpi = int(dpi_tuple)
 
                 image_data = image_to_base64(img)
                 analyzer = LabelAnalyzer(
-                    project_id, dpi=dpi, cache_dir=cache_dir,
+                    project_id, dpi=image_dpi, cache_dir=cache_dir,
                     confidence_weights=confidence_weights,
                     use_cache=use_cache,
                 )
@@ -2134,13 +2143,31 @@ def image_to_base64(img: PIL_Image.Image, format: str = "JPEG") -> Dict:
 
 
 def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer, List[DetectedPart]]:
-    """Convenience function: load image and run full analysis"""
+    """Convenience function: load image and run full analysis
+    
+    Automatically extracts DPI from image metadata if available.
+    Falls back to 300 DPI if not embedded.
+    """
     logger.info(f"Loading image: {image_path}")
     
     img = PIL_Image.open(image_path)
+    
+    # Extract DPI from image metadata if available
+    image_dpi = 300  # Default fallback
+    if hasattr(img, 'info') and 'dpi' in img.info:
+        dpi_tuple = img.info['dpi']
+        if isinstance(dpi_tuple, (tuple, list)) and len(dpi_tuple) >= 1:
+            image_dpi = int(dpi_tuple[0])  # Use X-DPI (usually same as Y-DPI)
+            logger.info(f"  ✓ Extracted DPI from image metadata: {image_dpi} DPI")
+        elif isinstance(dpi_tuple, (int, float)):
+            image_dpi = int(dpi_tuple)
+            logger.info(f"  ✓ Extracted DPI from image metadata: {image_dpi} DPI")
+    else:
+        logger.info(f"  ℹ️  No DPI in image metadata, using default: {image_dpi} DPI")
+    
     image_data = image_to_base64(img)
     
-    analyzer = LabelAnalyzer(project_id)
+    analyzer = LabelAnalyzer(project_id, dpi=image_dpi)
     parts = analyzer.analyze(img, image_data)
     
     return analyzer, parts
