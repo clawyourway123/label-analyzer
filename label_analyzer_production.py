@@ -1767,25 +1767,37 @@ If no clear number is visible, return 0."""
             # Mixed-case text has two clusters: short (x-height) and tall (caps/ascenders).
             # We use histogram peak detection to find both, then use x-height for compliance.
             
-            # Build histogram of body char heights (0.05mm bins)
+            # Build histogram of body char heights (0.02mm bins)
             height_bins = Counter(round(h, 2) for h in body_char_heights)
             
-            # Find peaks in the histogram (local maxima with minimum significance)
+            # Cluster nearby bins (within 0.08mm) into groups, then find cluster centers
+            # This avoids the problem of adjacent bins both being "peaks"
             sorted_heights = sorted(height_bins.keys())
-            peaks = []
-            for i, h in enumerate(sorted_heights):
+            clusters = []  # list of (weighted_center, total_count, [heights])
+            for h in sorted_heights:
                 count = height_bins[h]
-                # Include neighbors for smoothing (±0.02mm window)
-                neighbor_count = count
-                for delta in [-0.02, -0.01, 0.01, 0.02]:
-                    neighbor_count += height_bins.get(round(h + delta, 2), 0)
-                
-                # Peak must have at least 3 characters
-                if neighbor_count >= 3:
-                    peaks.append((h, neighbor_count))
+                # Try to merge into existing cluster if close enough
+                merged = False
+                for cluster in clusters:
+                    if abs(h - cluster[0]) <= 0.08:
+                        # Merge: update weighted center
+                        old_total = cluster[1]
+                        new_total = old_total + count
+                        cluster[0] = (cluster[0] * old_total + h * count) / new_total
+                        cluster[1] = new_total
+                        cluster[2].append(h)
+                        merged = True
+                        break
+                if not merged:
+                    clusters.append([h, count, [h]])
+            
+            # Convert to peaks: (center_height, total_count)
+            peaks = [(c[0], c[1]) for c in clusters if c[1] >= 3]
             
             # Sort peaks by count (most common first)
             peaks.sort(key=lambda x: -x[1])
+            
+            logger.info(f"  📐 Height clusters: {[(round(h,3), n) for h, n in peaks[:5]]}")
             
             # Determine x-height and cap-height
             xheight_mm = 0.0
@@ -1866,18 +1878,20 @@ If no clear number is visible, return 0."""
                 tight_spacings = [s for s in spacings if abs(s - most_common_spacing) <= 0.3]
                 center_to_center_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
                 
-                # CLP line gap = center-to-center - CAP-HEIGHT (not x-height)
-                # Because gap is visible space between tallest chars on consecutive lines
-                line_distance_mm = max(0, center_to_center_mm - capheight_mm)
+                # CLP line gap = center-to-center - X-HEIGHT (not cap-height)
+                # CLP defines font size as x-height; "distance between lines" ≥ 120% of font size.
+                # The practical gap measurement: c2c minus the dominant body text height (x-height),
+                # since most characters are lowercase and that defines the visual line body.
+                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
                 
                 logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
-                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {capheight_mm:.3f} (cap-height) = {line_distance_mm:.3f}mm")
+                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} (x-height) = {line_distance_mm:.3f}mm")
                 logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
                            for i in range(len(line_y_centers_mm) - 1)]
                 center_to_center_mm = statistics.median(spacings)
-                line_distance_mm = max(0, center_to_center_mm - capheight_mm)
+                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
             
             # Height distribution for logging
             height_dist = Counter(round(h, 2) for h in all_char_heights_mm)
