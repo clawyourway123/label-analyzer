@@ -1296,6 +1296,7 @@ class LabelAnalyzer:
         self._gemini_scale_factor: float = 1.0  # Track coordinate scaling
         self.package_size_ml: int = package_size_ml or 500  # Default fallback
         self._image_cache: Dict[str, str] = {}  # Cache preprocessed images by hash
+        self._reference_dimensions: List[Dict] = []  # For PDF scale detection
         self.package_size_confidence: float = 0.0  # Confidence in detected size
     
     def clear_cache(self) -> int:
@@ -1403,6 +1404,68 @@ class LabelAnalyzer:
             
             doc = fitz.open(pdf_path)
             page = doc.load_page(0)
+            
+            # ============================================================
+            # SCALE DETECTION: Check if PDF artwork is at 1:1 physical scale
+            # ============================================================
+            # If user provided a reference dimension, compute scale factor.
+            # Font height uses VERTICAL scale (artwork may be non-uniformly scaled).
+            vertical_scale = 1.0
+            horizontal_scale = 1.0
+            
+            if hasattr(self, '_reference_dimensions') and self._reference_dimensions:
+                # Find all significant vertical and horizontal lines in the PDF
+                all_drawings = page.get_drawings()
+                v_lines_mm = []
+                h_lines_mm = []
+                for d in all_drawings:
+                    for item in d.get('items', []):
+                        if item[0] == 'l':
+                            p1, p2 = item[1], item[2]
+                            if abs(p1.y - p2.y) < 2:  # horizontal
+                                length = abs(p2.x - p1.x) / 72 * 25.4
+                                if length > 50:
+                                    h_lines_mm.append(length)
+                            elif abs(p1.x - p2.x) < 2:  # vertical
+                                length = abs(p2.y - p1.y) / 72 * 25.4
+                                if length > 50:
+                                    v_lines_mm.append(length)
+                
+                # Match each reference to closest vector line
+                for ref in self._reference_dimensions:
+                    ref_mm = ref['mm']
+                    orientation = ref.get('orientation', 'auto')
+                    
+                    # Find best match
+                    best_match = None
+                    best_diff = float('inf')
+                    
+                    if orientation in ('vertical', 'auto'):
+                        for v in v_lines_mm:
+                            diff = abs(v - ref_mm)
+                            ratio = ref_mm / v if v > 0 else 999
+                            if diff < best_diff and 0.8 < ratio < 1.3:
+                                best_diff = diff
+                                best_match = ('vertical', v, ref_mm / v)
+                    
+                    if orientation in ('horizontal', 'auto'):
+                        for h in h_lines_mm:
+                            diff = abs(h - ref_mm)
+                            ratio = ref_mm / h if h > 0 else 999
+                            if diff < best_diff and 0.8 < ratio < 1.3:
+                                best_diff = diff
+                                best_match = ('horizontal', h, ref_mm / h)
+                    
+                    if best_match:
+                        orient, vec_mm, scale = best_match
+                        if orient == 'vertical':
+                            vertical_scale = scale
+                        else:
+                            horizontal_scale = scale
+                        logger.info(f"  📏 Scale from ref {ref_mm}mm: {orient} line {vec_mm:.2f}mm → scale={scale:.4f}")
+                
+                if vertical_scale != 1.0 or horizontal_scale != 1.0:
+                    logger.info(f"  📏 Applied scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
             
             # Convert pixel coordinates back to PDF points
             zoom = self.original_dpi / 72  # Same zoom used in pdf_to_image()
@@ -1596,6 +1659,18 @@ class LabelAnalyzer:
             # Height distribution for logging
             height_dist = Counter(round(h, 2) for h in all_char_heights_mm)
             common_heights = height_dist.most_common(5)
+            
+            # Apply vertical scale factor (font height and line spacing are vertical)
+            if vertical_scale != 1.0:
+                font_size_mm_raw = font_size_mm
+                median_font_mm_raw = median_font_mm
+                line_distance_mm_raw = line_distance_mm
+                font_size_mm *= vertical_scale
+                median_font_mm *= vertical_scale
+                line_distance_mm *= vertical_scale
+                logger.info(f"  📏 Vertical scale {vertical_scale:.4f} applied:")
+                logger.info(f"     Font: {font_size_mm_raw:.3f}mm → {font_size_mm:.3f}mm")
+                logger.info(f"     Line gap: {line_distance_mm_raw:.3f}mm → {line_distance_mm:.3f}mm")
             
             logger.info(f"  ✅ PDF vector font measurement:")
             logger.info(f"     Font size: {font_size_mm:.3f}mm (mean), {median_font_mm:.3f}mm (median)")
