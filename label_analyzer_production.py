@@ -1370,6 +1370,169 @@ class LabelAnalyzer:
         return region
     
     # ========================================================================
+    # PDF VECTOR FONT MEASUREMENT (deterministic, no Gemini needed)
+    # ========================================================================
+    
+    def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict) -> Optional[Dict]:
+        """
+        Measure font size directly from PDF vector paths (100% deterministic).
+        
+        Instead of asking Gemini to measure pixels (unreliable), we extract the
+        actual glyph outlines from the PDF and measure their bounding boxes in
+        PDF points, then convert to mm.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            region_rect_px: Region bounding box in pixel coordinates at rendering DPI
+                           {'xmin': int, 'ymin': int, 'xmax': int, 'ymax': int}
+        
+        Returns:
+            Dict with font_size_mm, line_distance_mm, measurement_confidence, etc.
+            or None if measurement failed
+        """
+        try:
+            import fitz
+            import statistics
+            from collections import Counter
+            
+            doc = fitz.open(pdf_path)
+            page = doc.load_page(0)
+            
+            # Convert pixel coordinates back to PDF points
+            zoom = self.original_dpi / 72  # Same zoom used in pdf_to_image()
+            pt_xmin = region_rect_px['xmin'] / zoom
+            pt_ymin = region_rect_px['ymin'] / zoom
+            pt_xmax = region_rect_px['xmax'] / zoom
+            pt_ymax = region_rect_px['ymax'] / zoom
+            
+            logger.info(f"  📐 PDF vector measurement: region px=({region_rect_px['xmin']},{region_rect_px['ymin']})-({region_rect_px['xmax']},{region_rect_px['ymax']})")
+            logger.info(f"  📐 Converted to PDF pts: ({pt_xmin:.1f},{pt_ymin:.1f})-({pt_xmax:.1f},{pt_ymax:.1f})")
+            
+            # Extract all drawings in this region
+            drawings = page.get_drawings()
+            region_paths = []
+            for d in drawings:
+                r = d.get('rect')
+                if r:
+                    # Check if drawing is within the region (with small margin)
+                    margin = 2  # pts
+                    if (r[0] >= pt_xmin - margin and r[2] <= pt_xmax + margin and
+                        r[1] >= pt_ymin - margin and r[3] <= pt_ymax + margin):
+                        w = r[2] - r[0]
+                        h = r[3] - r[1]
+                        # Filter for text-glyph-sized elements
+                        if 0.3 < h < 20 and 0.1 < w < 30:
+                            region_paths.append({
+                                'rect': r, 'w': w, 'h': h,
+                                'y_top': r[1], 'y_bot': r[3],
+                                'x': r[0], 'x_end': r[2],
+                                'y_center': (r[1] + r[3]) / 2
+                            })
+            
+            doc.close()
+            
+            if len(region_paths) < 10:
+                logger.info(f"  ⚠️ Only {len(region_paths)} glyph paths in region — too few for reliable measurement")
+                return None
+            
+            logger.info(f"  📐 Found {len(region_paths)} glyph paths in region")
+            
+            # Group paths into text lines by y_center
+            region_paths.sort(key=lambda g: g['y_center'])
+            text_lines = []
+            current_line = [region_paths[0]]
+            for g in region_paths[1:]:
+                if abs(g['y_center'] - current_line[-1]['y_center']) < 2.0:  # ~0.7mm tolerance
+                    current_line.append(g)
+                else:
+                    if len(current_line) >= 5:  # At least 5 paths = likely a text line
+                        text_lines.append(current_line)
+                    current_line = [g]
+            if len(current_line) >= 5:
+                text_lines.append(current_line)
+            
+            if len(text_lines) < 1:
+                logger.info(f"  ⚠️ No text lines detected in region")
+                return None
+            
+            logger.info(f"  📐 Detected {len(text_lines)} text lines")
+            
+            # For each text line: group overlapping paths into characters, measure heights
+            all_char_heights_mm = []
+            line_y_centers_mm = []
+            
+            for line_paths in text_lines:
+                # Group by x-overlap into characters
+                line_paths.sort(key=lambda g: g['x'])
+                chars = []
+                current_char = [line_paths[0]]
+                for g in line_paths[1:]:
+                    cur_x_end = max(p['x_end'] for p in current_char)
+                    if g['x'] < cur_x_end + 0.5:  # Overlapping or adjacent
+                        current_char.append(g)
+                    else:
+                        chars.append(current_char)
+                        current_char = [g]
+                chars.append(current_char)
+                
+                # Measure each character's full height (union of all sub-paths)
+                char_heights_pt = []
+                for ch in chars:
+                    top = min(p['y_top'] for p in ch)
+                    bot = max(p['y_bot'] for p in ch)
+                    char_heights_pt.append(bot - top)
+                
+                # Convert to mm
+                char_heights_mm = [h / 72 * 25.4 for h in char_heights_pt]
+                all_char_heights_mm.extend(char_heights_mm)
+                
+                # Line y-center for spacing calculation
+                line_y = statistics.median([p['y_center'] for p in line_paths])
+                line_y_centers_mm.append(line_y / 72 * 25.4)
+            
+            if not all_char_heights_mm:
+                return None
+            
+            # Font size = mean of all character heights (matches human measurement method)
+            # This naturally blends lowercase x-height and uppercase cap-height
+            font_size_mm = statistics.mean(all_char_heights_mm)
+            median_font_mm = statistics.median(all_char_heights_mm)
+            
+            # Line spacing = median consecutive line distance
+            line_distance_mm = 0.0
+            if len(line_y_centers_mm) >= 2:
+                spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
+                           for i in range(len(line_y_centers_mm) - 1)]
+                line_distance_mm = statistics.median(spacings)
+            
+            # Height distribution for logging
+            height_dist = Counter(round(h, 2) for h in all_char_heights_mm)
+            common_heights = height_dist.most_common(5)
+            
+            logger.info(f"  ✅ PDF vector font measurement:")
+            logger.info(f"     Font size: {font_size_mm:.3f}mm (mean), {median_font_mm:.3f}mm (median)")
+            logger.info(f"     Characters measured: {len(all_char_heights_mm)}")
+            logger.info(f"     Line spacing: {line_distance_mm:.3f}mm ({len(text_lines)} lines)")
+            logger.info(f"     Common heights: {common_heights}")
+            
+            return {
+                'font_size_mm': round(font_size_mm, 4),
+                'font_size_mm_median': round(median_font_mm, 4),
+                'line_distance_mm': round(line_distance_mm, 4),
+                'measurement_confidence': 0.95,  # Vector measurement is high-confidence
+                'measurement_method': 'pdf-vector-direct',
+                'characters_measured': len(all_char_heights_mm),
+                'text_lines_found': len(text_lines),
+                'notes': f'Deterministic PDF vector measurement: {len(all_char_heights_mm)} chars across {len(text_lines)} lines'
+            }
+            
+        except Exception as e:
+            logger.warning(f"  ⚠️ PDF vector font measurement failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    # ========================================================================
     # STAGE 0: CALIBRATION
     # ========================================================================
     
@@ -1802,6 +1965,95 @@ If no measurement lines found, return empty array.
         logger.info(f"Stage 3: Measuring CLP metrics for '{region_label}'")
         
         try:
+            # ================================================================
+            # PRIORITY: Try PDF vector measurement first (deterministic, exact)
+            # ================================================================
+            pdf_vector_measurements = None
+            if hasattr(self, '_pdf_path') and self._pdf_path:
+                pdf_vector_measurements = self.measure_font_from_pdf_vectors(
+                    self._pdf_path, region['rect']
+                )
+            
+            if pdf_vector_measurements and pdf_vector_measurements.get('font_size_mm', 0) > 0:
+                # Success! Use deterministic vector measurements
+                logger.info(f"  ✅ Using PDF vector measurements (deterministic, no Gemini needed for font size)")
+                
+                # We still need Gemini for COLOR assessment (background, text color, contrast)
+                # but NOT for font size measurement
+                color_prompt = """Analyze ONLY the colors of this CLP label region:
+1. What is the background color? (e.g., white, yellow, orange, dark purple)
+2. What is the text color? (e.g., black, white, dark blue)
+3. Is the contrast between text and background sufficient for readability?
+
+Report ONLY colors and contrast. Do NOT measure font sizes."""
+                
+                color_schema = {
+                    "type": "object",
+                    "properties": {
+                        "background_color": {"type": "string"},
+                        "text_color": {"type": "string"},
+                        "contrast_assessment": {"type": "string", "enum": ["high", "medium", "low"]}
+                    },
+                    "required": ["background_color", "text_color", "contrast_assessment"]
+                }
+                
+                # Convert cropped region for color analysis
+                buffered = BytesIO()
+                cropped_image.save(buffered, format="JPEG")
+                cropped_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                cropped_data = {"inline_data": {"mime_type": "image/jpeg", "data": cropped_b64}}
+                
+                crop_w, crop_h = cropped_image.width, cropped_image.height
+                color_response = self.gemini.analyze_image(
+                    cropped_data, color_prompt, color_schema,
+                    original_width=crop_w, original_height=crop_h,
+                    temperature=0.2
+                )
+                color_data = json.loads(color_response)
+                
+                # Merge vector measurements with color data
+                measurements = {
+                    'font_size_mm': pdf_vector_measurements['font_size_mm'],
+                    'font_size_pixels': 0,  # Not applicable for vector measurement
+                    'line_distance_mm': pdf_vector_measurements['line_distance_mm'],
+                    'line_distance_pixels': 0,
+                    'background_color': color_data.get('background_color', 'unknown'),
+                    'text_color': color_data.get('text_color', 'unknown'),
+                    'contrast_assessment': color_data.get('contrast_assessment', 'unknown'),
+                    'measurement_confidence': pdf_vector_measurements['measurement_confidence'],
+                    'measurement_method': pdf_vector_measurements['measurement_method'],
+                    'notes': pdf_vector_measurements.get('notes', ''),
+                    'characters_measured': pdf_vector_measurements.get('characters_measured', 0),
+                    'text_lines_found': pdf_vector_measurements.get('text_lines_found', 0),
+                }
+                
+                font_mm = measurements['font_size_mm']
+                line_dist_mm = measurements['line_distance_mm']
+                meas_conf = measurements['measurement_confidence']
+                
+                logger.info(f"  ✓ PDF Vector measurements:")
+                logger.info(f"    Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm")
+                logger.info(f"    BG={measurements['background_color']}, Contrast={measurements['contrast_assessment']}")
+                
+                # Skip all the Gemini font measurement, scale factor, correction factor logic
+                # Go directly to rule validation
+                val_time = time_module.time() - val_start
+                rule_results = validate_measurements_against_rules(
+                    measurements, package_size_ml, is_inner_packaging
+                )
+                
+                return {
+                    "measurements": measurements,
+                    "rule_results": rule_results,
+                    "overall_compliance": "PASS" if all(
+                        r.get("pass") for r in rule_results.values() if r.get("applicable")
+                    ) else "FAIL",
+                    "measurement_time_seconds": round(val_time, 2),
+                }
+            
+            # ================================================================
+            # FALLBACK: Gemini-based measurement (for non-PDF images)
+            # ================================================================
             # LAYER 1: GEMINI MEASURES (not judges)
             # IMPORTANT: Use ORIGINAL calibration DPI, not cropped image DPI
             # The cropped image inherits the same pixel density as the original
