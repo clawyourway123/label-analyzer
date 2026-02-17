@@ -1753,15 +1753,93 @@ If no clear number is visible, return 0."""
                     body_line_indices.add(i)
                     body_char_heights.extend(line_char_heights[i])
             
-            if body_char_heights and len(body_char_heights) >= 5:
-                font_size_mm = statistics.mean(body_char_heights)
-                median_font_mm = statistics.median(body_char_heights)
-                logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
-            else:
-                font_size_mm = statistics.mean(all_char_heights_mm)
-                median_font_mm = statistics.median(all_char_heights_mm)
+            if not body_char_heights or len(body_char_heights) < 5:
+                body_char_heights = all_char_heights_mm
                 body_line_indices = set(range(len(text_lines)))
                 logger.info(f"  📐 Using all chars (no clear body text cluster)")
+            else:
+                logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
+            
+            # ================================================================
+            # BIMODAL HEIGHT CLUSTERING: Separate x-height from cap-height
+            # ================================================================
+            # CLP requires X-HEIGHT (lowercase letters), not mean of all chars.
+            # Mixed-case text has two clusters: short (x-height) and tall (caps/ascenders).
+            # We use histogram peak detection to find both, then use x-height for compliance.
+            
+            # Build histogram of body char heights (0.05mm bins)
+            height_bins = Counter(round(h, 2) for h in body_char_heights)
+            
+            # Find peaks in the histogram (local maxima with minimum significance)
+            sorted_heights = sorted(height_bins.keys())
+            peaks = []
+            for i, h in enumerate(sorted_heights):
+                count = height_bins[h]
+                # Include neighbors for smoothing (±0.02mm window)
+                neighbor_count = count
+                for delta in [-0.02, -0.01, 0.01, 0.02]:
+                    neighbor_count += height_bins.get(round(h + delta, 2), 0)
+                
+                # Peak must have at least 3 characters
+                if neighbor_count >= 3:
+                    peaks.append((h, neighbor_count))
+            
+            # Sort peaks by count (most common first)
+            peaks.sort(key=lambda x: -x[1])
+            
+            # Determine x-height and cap-height
+            xheight_mm = 0.0
+            capheight_mm = 0.0
+            measurement_approach = 'single-peak'
+            
+            if len(peaks) >= 2:
+                # Two peaks detected = bimodal distribution (mixed case)
+                # Smaller peak = x-height, larger peak = cap-height
+                p1_h, p1_count = peaks[0]
+                p2_h, p2_count = peaks[1]
+                
+                # Sort by height (not count) to identify which is x-height vs cap-height
+                short_peak, tall_peak = sorted([p1_h, p2_h])
+                
+                # Sanity check: peaks should be reasonably separated (>0.3mm)
+                if tall_peak - short_peak > 0.3:
+                    xheight_mm = short_peak
+                    capheight_mm = tall_peak
+                    measurement_approach = 'bimodal-xheight'
+                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm (n={height_bins[short_peak]}), cap-height={capheight_mm:.3f}mm (n={height_bins[tall_peak]})")
+                else:
+                    # Peaks too close, likely noise — fall back to single peak
+                    xheight_mm = peaks[0][0]
+                    capheight_mm = peaks[0][0]
+                    logger.info(f"  📐 Peaks too close ({tall_peak - short_peak:.2f}mm), treating as single peak: {xheight_mm:.3f}mm")
+            
+            if len(peaks) == 1:
+                # Single peak — could be all-caps OR all-lowercase
+                peak_h = peaks[0][0]
+                
+                # Heuristic: if peak > 1.5mm, likely all-caps (estimate x-height via 0.70 ratio)
+                if peak_h > 1.5:
+                    capheight_mm = peak_h
+                    xheight_mm = peak_h * 0.70  # Typical cap-to-x-height ratio for sans-serif
+                    measurement_approach = 'all-caps-estimated'
+                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (>1.5mm) — likely all-caps, estimating x-height = {xheight_mm:.3f}mm (70% ratio)")
+                else:
+                    # Likely all-lowercase or small font
+                    xheight_mm = peak_h
+                    capheight_mm = peak_h / 0.70  # Estimate cap-height for spacing calc
+                    measurement_approach = 'single-peak-lowercase'
+                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (≤1.5mm) — treating as x-height")
+            
+            if len(peaks) == 0:
+                # No clear peaks (very uniform or too few chars) — fall back to median
+                xheight_mm = statistics.median(body_char_heights)
+                capheight_mm = xheight_mm / 0.70
+                measurement_approach = 'fallback-median'
+                logger.warning(f"  ⚠️ No clear peaks in height distribution, using median: {xheight_mm:.3f}mm")
+            
+            # Final font size = x-height (CLP requirement)
+            font_size_mm = xheight_mm
+            median_font_mm = statistics.median(body_char_heights)
             
             # ================================================================
             # LINE SPACING (CLP): Visible gap between lines
@@ -1770,8 +1848,9 @@ If no clear number is visible, return 0."""
             # whitespace between the bottom of text in one line and top of text in the next.
             # This is NOT leading (baseline-to-baseline) but the inter-line GAP.
             # 
-            # Calculated as: center_to_center_spacing - font_size
-            # This gives the visible gap between text body of consecutive lines.
+            # CRITICAL: Gap is measured from TALLEST chars (cap-height), not x-height.
+            # The visible gap is between bottom of "H" on line N and top of "H" on line N+1,
+            # so we subtract cap-height from center-to-center spacing.
             
             body_text_line_ys = sorted([line_y_centers_mm[i] for i in body_line_indices])
             
@@ -1787,17 +1866,18 @@ If no clear number is visible, return 0."""
                 tight_spacings = [s for s in spacings if abs(s - most_common_spacing) <= 0.3]
                 center_to_center_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
                 
-                # CLP line gap = center-to-center - font height
-                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
+                # CLP line gap = center-to-center - CAP-HEIGHT (not x-height)
+                # Because gap is visible space between tallest chars on consecutive lines
+                line_distance_mm = max(0, center_to_center_mm - capheight_mm)
                 
                 logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
-                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} = {line_distance_mm:.3f}mm")
+                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {capheight_mm:.3f} (cap-height) = {line_distance_mm:.3f}mm")
                 logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
                            for i in range(len(line_y_centers_mm) - 1)]
                 center_to_center_mm = statistics.median(spacings)
-                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
+                line_distance_mm = max(0, center_to_center_mm - capheight_mm)
             
             # Height distribution for logging
             height_dist = Counter(round(h, 2) for h in all_char_heights_mm)
@@ -1816,20 +1896,28 @@ If no clear number is visible, return 0."""
                 logger.info(f"     Line gap: {line_distance_mm_raw:.3f}mm → {line_distance_mm:.3f}mm")
             
             logger.info(f"  ✅ PDF vector font measurement:")
-            logger.info(f"     Font size: {font_size_mm:.3f}mm (mean), {median_font_mm:.3f}mm (median)")
+            logger.info(f"     X-height (CLP metric): {font_size_mm:.3f}mm")
+            logger.info(f"     Cap-height (for gap calc): {capheight_mm:.3f}mm")
+            logger.info(f"     Median char height: {median_font_mm:.3f}mm")
+            logger.info(f"     Measurement approach: {measurement_approach}")
             logger.info(f"     Characters measured: {len(all_char_heights_mm)}")
-            logger.info(f"     Line spacing: {line_distance_mm:.3f}mm ({len(text_lines)} lines)")
-            logger.info(f"     Common heights: {common_heights}")
+            logger.info(f"     Line spacing (gap): {line_distance_mm:.3f}mm ({len(text_lines)} lines)")
+            logger.info(f"     Height distribution: {common_heights}")
             
             return {
-                'font_size_mm': round(font_size_mm, 4),
+                'font_size_mm': round(font_size_mm, 4),  # x-height (CLP requirement)
+                'xheight_mm': round(xheight_mm, 4),
+                'cap_height_mm': round(capheight_mm, 4),
                 'font_size_mm_median': round(median_font_mm, 4),
                 'line_distance_mm': round(line_distance_mm, 4),
+                'center_to_center_mm': round(center_to_center_mm, 4),
                 'measurement_confidence': 0.95,  # Vector measurement is high-confidence
-                'measurement_method': 'pdf-vector-direct',
+                'measurement_method': f'pdf-vector-{measurement_approach}',
+                'measurement_approach': measurement_approach,
                 'characters_measured': len(all_char_heights_mm),
                 'text_lines_found': len(text_lines),
-                'notes': f'Deterministic PDF vector measurement: {len(all_char_heights_mm)} chars across {len(text_lines)} lines'
+                'height_peaks': [(round(h, 3), c) for h, c in peaks[:3]],  # Top 3 peaks for debugging
+                'notes': f'Bimodal clustering: {measurement_approach}, {len(all_char_heights_mm)} chars across {len(text_lines)} lines'
             }
             
         except Exception as e:
