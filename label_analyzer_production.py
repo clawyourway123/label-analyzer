@@ -520,11 +520,22 @@ CLP_VALIDATION_SCHEMA = {
     "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence"]
 }
 
-def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500) -> Dict:
+def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
     """Apply CLP rules to measurements. 100% deterministic.
+    
+    EU Regulation 1223/2009 Compliance Rules:
+    - Rule 1: Font size (package-size dependent)
+    - Rule 2: Line distance (120% of font size)
+    - Rule 3: White background + Black text (STRICT)
+    - Rule 4: Inner packaging ≤10ml exemption (font can be smaller but must be legible)
     
     Returns "SKIP" status when measurements are too uncertain to evaluate.
     Only returns "PASS" or "FAIL" when measurement_confidence >= 0.5.
+    
+    Args:
+        metrics: Measurement dict with font_size_mm, line_distance_mm, colors, etc.
+        package_size_ml: Package size in ml (affects font threshold)
+        is_inner_packaging: True if this is inner packaging ≤10ml (exemption applies)
     """
     
     # Check if measurements are too uncertain to evaluate
@@ -572,9 +583,17 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
     contrast = metrics.get("contrast_assessment", "").lower()
     
     # Rule 1: Font size
-    font_pass = font_mm >= min_font_mm
-    font_status = "PASS" if font_pass else "FAIL"
-    font_detail = f"{font_mm:.2f} mm ({rule_label} requires ≥{min_font_mm} mm)"
+    # EU Regulation 1223/2009: Inner packaging ≤10ml can be smaller (exemption) but must remain easily legible
+    if is_inner_packaging and package_size_ml <= 10:
+        # Inner packaging exemption: font can be smaller, but must be measurable and legible
+        # No minimum threshold, but must be legible (Gemini should report measurement_confidence)
+        font_pass = font_mm > 0 and measurement_confidence >= 0.7  # Must be legible (0.7+ confidence)
+        font_status = "PASS" if font_pass else "UNCLEAR"
+        font_detail = f"{font_mm:.2f} mm (Inner packaging ≤10ml exemption - must remain easily legible. Legibility confidence: {measurement_confidence:.0%})"
+    else:
+        font_pass = font_mm >= min_font_mm
+        font_status = "PASS" if font_pass else "FAIL"
+        font_detail = f"{font_mm:.2f} mm ({rule_label} requires ≥{min_font_mm} mm)"
     
     # Rule 2: Line distance (≥120% of font size)
     min_line_mm = font_mm * 1.2
@@ -586,10 +605,18 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
         line_status = "PASS" if line_pass else "FAIL"
         line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
     
-    # Rule 3: Background contrast
-    contrast_pass = contrast in ["high", "excellent", "good"]
-    contrast_status = "PASS" if contrast_pass else "FAIL" if contrast == "low" else "UNCLEAR"
-    contrast_detail = f"Contrast: {metrics.get('contrast_assessment', 'unknown')} ({metrics.get('background_color')} bg, {metrics.get('text_color')} text)"
+    # Rule 3: Background & Text Color (STRICT: White background with Black text ONLY)
+    # EU Regulation 1223/2009: CLP text MUST be white background with black letters
+    bg_color = metrics.get('background_color', '').lower()
+    text_color = metrics.get('text_color', '').lower()
+    
+    # Check for white background with black text
+    is_white_bg = any(word in bg_color for word in ['white', 'off-white', 'ivory'])
+    is_black_text = any(word in text_color for word in ['black', 'dark', 'dark gray', 'grey'])
+    
+    contrast_pass = is_white_bg and is_black_text
+    contrast_status = "PASS" if contrast_pass else "FAIL"
+    contrast_detail = f"Requirement: White background + Black text. Found: {metrics.get('background_color', 'unknown')} bg, {metrics.get('text_color', 'unknown')} text"
     
     overall_pass = font_pass and (line_pass if line_pass is not None else True) and contrast_pass
     
@@ -1462,9 +1489,15 @@ If no measurement line is found, set measurement_line to null.
     # STAGE 3: CLP COMPLIANCE VALIDATION
     # ========================================================================
     
-    def validate_clp_compliance(self, image_data: Dict, region: Dict, cropped_image: PIL_Image.Image, package_size_ml: int = 500) -> Dict:
+    def validate_clp_compliance(self, image_data: Dict, region: Dict, cropped_image: PIL_Image.Image, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
         """
         Stage 3: Two-layer CLP compliance validation
+        
+        Implements EU Regulation 1223/2009 CLP rules:
+        - Rule 1: Font size (1.2/1.4/1.8mm based on package size)
+        - Rule 2: Line distance (≥120% of font)
+        - Rule 3: White background + Black text (STRICT)
+        - Rule 4: Inner packaging ≤10ml exemption (can be smaller if legible)
         
         Layer 1: Gemini MEASURES (font size, line distance, contrast)
         Layer 2: Local rules apply deterministic checks
@@ -1573,7 +1606,7 @@ If no measurement line is found, set measurement_line to null.
                 }
             
             # LAYER 2: LOCAL DETERMINISTIC RULE CHECKS (100% reproducible)
-            rule_results = validate_measurements_against_rules(measurements, package_size_ml)
+            rule_results = validate_measurements_against_rules(measurements, package_size_ml, is_inner_packaging=is_inner_packaging)
             
             # Log rule application for audit trail
             logger.info(f"  ✓ Rule validation:")
@@ -1777,10 +1810,13 @@ If no measurement line is found, set measurement_line to null.
                 cropped = image.crop((xmin, ymin, xmax, ymax))
                 logger.info(f"  ✓ Cropped '{region['label']}': {cropped.width}×{cropped.height}px")
                 
-                # Pass detected package size for correct rule application
+                # Pass detected package size and inner packaging flag for correct rule application
+                # Inner packaging exemption applies to ≤10ml (font can be smaller if legible)
+                is_inner = self.package_size_ml <= 10 and region.get("content_type", "").lower() in ["inner packaging", "inner label", "inner"]
                 compliance = self.validate_clp_compliance(
                     image_data, region, cropped,
-                    package_size_ml=self.package_size_ml
+                    package_size_ml=self.package_size_ml,
+                    is_inner_packaging=is_inner
                 )
                 region["compliance_check"] = compliance
         
