@@ -1908,13 +1908,14 @@ If no clear number is visible, return 0."""
                                         diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm * 100 if glyph_xheight_mm > 0 else 0
                                         logger.info(f"  📐 Origin vs Glyph x-height difference: {diff_pct:.1f}% (origin={text_xheight_mm:.3f}mm, glyph={glyph_xheight_mm:.3f}mm)")
                                         
-                                        # If origin-based is >5% higher than glyph-based, prefer glyph
-                                        # (origin-based tends to over-measure due to bbox top padding)
-                                        if text_xheight_mm > glyph_xheight_mm * 1.05:
-                                            logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (origin-based {diff_pct:.1f}% too high, likely bbox padding)")
-                                            text_xheight_mm = glyph_xheight_mm
-                                            if cap_glyph_bbox and cap_glyph_bbox.height > 0:
-                                                text_capheight_mm = glyph_capheight_mm
+                                        # ALWAYS prefer glyph-based x-height when available.
+                                        # Glyph bbox is the font designer's intended metrics — the gold standard.
+                                        # Origin-based is an approximation that suffers from bbox padding.
+                                        # Previous threshold (5%) was too generous and let over-measurements through.
+                                        logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (gold standard, origin diff={diff_pct:.1f}%)")
+                                        text_xheight_mm = glyph_xheight_mm
+                                        if cap_glyph_bbox and cap_glyph_bbox.height > 0:
+                                            text_capheight_mm = glyph_capheight_mm
                                     else:
                                         logger.debug(f"  📐 Glyph bbox for 'x' not available or zero height")
                                 else:
@@ -1922,7 +1923,8 @@ If no clear number is visible, return 0."""
                             else:
                                 logger.debug(f"  📐 Font '{font_name}' not found in page fonts for glyph-based measurement")
                     except Exception as glyph_err:
-                        logger.debug(f"  📐 Glyph-based x-height measurement failed: {glyph_err}")
+                        logger.warning(f"  ⚠️  Glyph-based measurement failed for font: {glyph_err}")
+                        logger.warning(f"     Falling back to origin-based measurement (less accurate)")
                     
                 else:
                     logger.warning(f"  ⚠️  Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
@@ -2059,9 +2061,12 @@ If no clear number is visible, return 0."""
                 vector_xheight = sorted([p[0] for p in peaks[:2]])[0] if len(peaks) >= 2 else peaks[0][0]
                 disagreement_pct = abs(text_xheight_mm - vector_xheight) / text_xheight_mm if text_xheight_mm > 0 else 0
                 if disagreement_pct > 0.15:
-                    logger.warning(f"  ⚠️  Cross-validation: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
+                    logger.error(f"  ❌ CROSS-VALIDATION FAILED: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
+                    logger.error(f"     This suggests measurement instability — recommend human review")
+                elif disagreement_pct > 0.05:
+                    logger.warning(f"  ⚠️  Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) differ by {disagreement_pct:.0%}")
                 else:
-                    logger.info(f"  ✓ Cross-validation: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
+                    logger.info(f"  ✓ Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
             
             # ================================================================
             # LINE SPACING (CLP): Visible gap between lines
