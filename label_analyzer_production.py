@@ -519,6 +519,7 @@ You MUST measure lowercase letter body height (e.g., the height of 'a', 'e', 'o'
 
 1. **Font size (X-HEIGHT - CRITICAL):** Find the smallest readable text in the CLP section. 
    - **STEP 1:** Identify a lowercase letter word (e.g., "natural", "certified", "contains")
+     * **EDGE CASE - ALL CAPS:** If text is all capitals (e.g., "WARNING", "DANGER"), measure cap-height (baseline to top of 'H' or 'A') and multiply by 0.71 to approximate x-height. Note: "Measured cap-height [X]px × 0.71 = [Y]px x-height equivalent"
    - **STEP 2:** Locate the x-height line: 
      * For letters like 'a', 'e', 'x', 'c': measure from baseline to the TOP of the letter body (not the ascender)
      * EXCLUDE the tallest part if it's an ascender (d, h, k, l, t) or descender (g, j, p, q, y)
@@ -529,9 +530,10 @@ You MUST measure lowercase letter body height (e.g., the height of 'a', 'e', 'o'
      * Converted to mm: X / {dpmm:.2f} = Y mm
      * Confirm: "X-height measured from letter '[letter]' in word '[word]': Y mm"
 
-2. **Line distance:** Measure the vertical gap between two consecutive lines of text.
-   - Measure from baseline of one line to baseline of next line
-   - Report in pixels and mm
+2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
+   - **MUST** measure from baseline of one line to baseline of next line (NOT top-to-top or bottom-to-bottom)
+   - Baseline = the imaginary line that letters sit on (bottom of 'a', 'e', 'x'; excludes descenders like 'g', 'p')
+   - Report in pixels and mm with confirmation: "Baseline-to-baseline distance: [X]px = [Y]mm"
 
 3. **Background color:** Describe the background of the text region
    - Is it white? Black? Another color? Gradient?
@@ -556,6 +558,7 @@ CLP_VALIDATION_SCHEMA = {
         "text_color": {"type": "string", "description": "Described text color"},
         "contrast_assessment": {"type": "string", "description": "Contrast quality (high/medium/low)"},
         "measurement_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How confident in measurements (0-1)"},
+        "measurement_method": {"type": "string", "description": "Method used: 'x-height', 'cap-height-converted', or 'unclear'"},
         "notes": {"type": "string", "description": "Any ambiguities or special observations"}
     },
     "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence"]
@@ -1710,10 +1713,11 @@ If no measurement line is found, set measurement_line to null.
             cropped_w, cropped_h = cropped_image.width, cropped_image.height
             
             # DEBUG: Log all values for troubleshooting
+            measurement_method = measurements.get('measurement_method', 'x-height')
             logger.info(f"  ✓ Gemini measurements (X-HEIGHT OPTIMIZED):")
             logger.info(f"    [CALIBRATION] DPI={self.calibration.true_dpi}, dpmm={self.calibration.dpmm:.4f}, calibrated={self.calibration.is_calibrated}")
             logger.info(f"    [CROP] {cropped_w}×{cropped_h}px")
-            logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm")
+            logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm (method: {measurement_method})")
             logger.info(f"    [MEASUREMENT] Line: {line_dist_px:.1f}px → {line_dist_mm:.4f}mm")
             logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}, x-height correction applied={meas_conf_raw >= 0.7}")
             
