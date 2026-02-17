@@ -367,15 +367,16 @@ class MeasurementLine(BaseModel):
 
 class CalibrationResult:
     """DPI calibration result"""
+    # CLASS-LEVEL CACHE: persists across multiple runs on same PDF
+    # Maps reference_value_mm → DPI so consistent measurements across runs
+    _global_reference_cache = {}
+    
     def __init__(self, original_dpi: int):
         self.original_dpi = original_dpi
         self.true_dpi = original_dpi
         self.dpmm = original_dpi / 25.4
         self.measurement_line: Optional[MeasurementLine] = None
         self.is_calibrated = False
-        # Cache: map reference value (mm) → DPI for consistency
-        # If Gemini finds the same reference again (diff pixel coords), reuse same DPI
-        self.reference_dpi_cache = {}
     
     def update(self, line: MeasurementLine):
         """Update DPI based on measurement line
@@ -388,25 +389,26 @@ class CalibrationResult:
                      (line.end_point.y - line.start_point.y)**2)**0.5
         
         if line.value_mm > 0:
-            # Check if we've calibrated using this reference value before
+            # Check if we've calibrated using this reference value before (across runs)
             ref_key = round(line.value_mm, 2)  # Round to 2 decimals for matching
             
-            if ref_key in self.reference_dpi_cache:
-                # Reuse cached DPI for this reference
-                cached_dpi = self.reference_dpi_cache[ref_key]
-                logger.info(f"  ℹ️  Reference {line.value_mm}mm seen before, reusing cached DPI: {cached_dpi} DPI")
+            if ref_key in CalibrationResult._global_reference_cache:
+                # Reuse cached DPI for this reference (persists across runs)
+                cached_dpi = CalibrationResult._global_reference_cache[ref_key]
+                logger.info(f"  ℹ️  Reference {line.value_mm}mm found in cache, reusing DPI: {cached_dpi} DPI (consistent across runs)")
                 self.true_dpi = cached_dpi
                 self.dpmm = cached_dpi / 25.4
                 self.measurement_line = line
                 self.is_calibrated = True
                 return True
             
-            # First time seeing this reference - calculate and cache
+            # First time seeing this reference - calculate and cache globally
             calculated_dpmm = px_length / line.value_mm
             calculated_dpi = int(round(calculated_dpmm * 25.4))
             
-            # Cache it
-            self.reference_dpi_cache[ref_key] = calculated_dpi
+            # Cache it globally so future runs reuse it
+            CalibrationResult._global_reference_cache[ref_key] = calculated_dpi
+            logger.info(f"  ℹ️  Caching reference {line.value_mm}mm → DPI {calculated_dpi} for future runs")
             
             self.true_dpi = calculated_dpi
             self.dpmm = calculated_dpmm
