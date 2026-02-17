@@ -1384,16 +1384,27 @@ class LabelAnalyzer:
         logger.info("Stage 0: DPI Calibration")
         
         prompt = """
-Identify a technical measurement line or ruler on this image that is labeled in 'mm'.
-The ruler should have clear pixel coordinates for start and end points, and a labeled numeric value in millimeters.
+CRITICAL: Find the PRIMARY measurement reference line on this image.
+
+RULES FOR SELECTION (in priority order):
+1. LONGEST visible line with mm labels (prefer longest over shortest)
+2. MUST be a CONTINUOUS line (not broken or segmented)
+3. MUST have a clear numeric mm value label directly attached
+4. If multiple lines exist, pick the one that is MOST PROMINENT (clearest, boldest, most obviously a reference scale)
+
+MEASUREMENT INSTRUCTIONS:
+- Measure the EXACT pixel coordinates of the line's start and end
+- Identify where the line begins (pixel x,y) and where it ends
+- Read the labeled mm value as precisely as possible
+- Be consistent: if you see the same line again, measure it the same way
 
 Return the following:
-- start_point: {x, y} pixel coordinates of the line start
-- end_point: {x, y} pixel coordinates of the line end  
-- value_mm: The numeric value in mm labeled on the ruler
+- start_point: {x, y} pixel coordinates of line START (leftmost or topmost point)
+- end_point: {x, y} pixel coordinates of line END (rightmost or bottommost point)  
+- value_mm: The numeric mm value labeled on this line
 - confidence: How confident you are (0.0 to 1.0)
 
-If no measurement line is found, set measurement_line to null.
+If no clear measurement line is found, set measurement_line to null.
 """
         
         calibration_schema = {
