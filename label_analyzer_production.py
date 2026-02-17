@@ -511,8 +511,8 @@ def get_clp_validation_prompt(true_dpi: int, dpmm: float, package_size_ml: int =
     Coordinates in the cropped image are in that crop's local coordinate space.
     The DPI/DPMM values apply to this crop (inherited from original image).
     
-    CRITICAL: This prompt MUST measure X-HEIGHT (not full cap height) for accuracy.
-    EU Regulation 1272/2008 (CLP) specifies x-height, not total character height.
+    CRITICAL: This prompt MUST measure VISIBLE FONT HEIGHT as displayed to consumers.
+    EU Regulation 1272/2008 (CLP) specifies visible font size, which is typically cap-height or full-height.
     
     Args:
         true_dpi: Calibrated DPI (from original image)
@@ -526,40 +526,35 @@ Do NOT judge compliance. Just provide the measurements.
 ### **Reference Scale:**
 The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm).
 
-### **CRITICAL INSTRUCTION — Measure X-HEIGHT (NOT Full Character Height):**
+### **CRITICAL INSTRUCTION — Measure VISIBLE FONT HEIGHT (as displayed to consumers):**
 
-EU Regulation 1272/2008 (CLP) CLP compliance requires measuring x-height (the height of lowercase 'x').
-This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') or descenders (like 'g', 'p', 'y').
+EU Regulation 1272/2008 (CLP) compliance requires measuring the VISIBLE FONT HEIGHT that a consumer actually sees.
+This is the full height of the characters as they appear on the label:
+- For mixed-case text: measure from baseline to top of CAPITAL LETTERS
+- For all-caps text: measure cap-height directly
+- For lowercase-only: measure from baseline to top of tallest letter
 
-**CRITICAL RULE:** You MUST measure x-height directly from lowercase letters. Do NOT estimate or convert.
-- Capital letter height is ~25-30% LARGER than x-height (e.g., 'H' is too tall)
-- Even if text is all capitals, find a mixed-case section or identify the X-HEIGHT from descender analysis
-- If you must approximate from all-caps text, be explicit: "Estimated x-height from [letter]: [value]px"
+**DO NOT measure x-height (the small height of lowercase body without ascenders).**
+X-height is only ~60-70% of visible font and is NOT what CLP regulations specify.
 
 ### **Task: Measure these metrics (provide numbers, not judgments):**
 
-1. **Font size (X-HEIGHT - CRITICAL):** Find the SMALLEST readable text in the CLP section. 
-   - **PREFERRED METHOD:** Identify any lowercase letter word (e.g., "natural", "certified", "contains", "hazard", "precaution")
-     * Measure from baseline (bottom of letter) to TOP of x-body (top of 'a', 'e', 'o', 'x', 'n', etc.)
-     * **MUST EXCLUDE:** Ascenders (d, h, k, l, t) and descenders (g, j, p, q, y) - these are taller/shorter
-     * Example: In "text", measure the 'e' or 'x' (NOT the 't')
-     * Report: "X-height measured from letter '[letter]' in word '[word]': [X]px = [Y]mm"
+1. **Font size (VISIBLE HEIGHT - CRITICAL):** Find the SMALLEST readable text in the CLP section. 
+   - **METHOD:** Identify readable text (any case)
+     * For mixed-case or capitals: Measure from baseline (bottom line letters sit on) to TOP of the TALLEST CHARACTER
+       - Example: In "Hazard", measure from baseline to top of 'H'
+       - Example: In "text", measure from baseline to top of 't'
+       - Report: "Visible font height measured from letter '[letter]': [X]px = [Y]mm"
+     * For all-caps only: Measure cap-height directly
+       - Pick a capital letter like 'H', 'I', 'M', or 'N'
+       - Measure from baseline to top of letter
+       - Report: "Cap-height measured from letter '[letter]': [X]px = [Y]mm"
    
-   - **IF ONLY ALL-CAPS TEXT EXISTS:**
-     * Look for letters like 'O' or 'I' that DON'T have descenders to identify baseline
-     * Measure the VISIBLE HEIGHT of the capital letter (baseline to top, full height)
-     * This is cap-height, NOT x-height—**DO NOT apply 0.71 conversion**
-     * Report: "All-caps text: measured cap-height [X]px from [letter]"
-     * CRITICAL: Provide an ESTIMATED x-height using 0.70 multiplier
-     * Calculate and report: "estimated_xheight_mm = [cap-height-mm] × 0.70"
-     * This allows automatic correction: code will use your estimate directly
-   
-   - **STEP 4:** Report measurement with confirmation
+   - **STEP 2:** Report measurement with confirmation
      * Height in pixels: X
      * Converted to mm: X / {dpmm:.2f} = Y mm
-     * Measurement method: "x-height-direct" (measured from lowercase) or "cap-height-estimated" (from all-caps with 0.70× estimate)
-     * CRITICAL: If measurement_method is "cap-height-estimated", ALWAYS include the estimated_xheight_mm field
-     * Confidence level: 0.9-1.0 if direct x-height, 0.75-0.85 if cap-height with estimate
+     * Measurement method: "visible-height-direct" (measured from actual characters as displayed)
+     * Confidence level: 0.85-1.0 if clear, 0.70-0.85 if slightly blurry or irregular
 
 2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
    - **MUST** measure from baseline of one line to baseline of next line (NOT top-to-top or bottom-to-bottom)
@@ -567,13 +562,13 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
    - Report in pixels and mm with confirmation: "Baseline-to-baseline distance: [X]px = [Y]mm"
 
 3. **Background color:** Describe the background of the text region
-   - Is it white? Black? Another color? Gradient?
+   - Is it white? Black? Yellow? Another color? Gradient?
    - Describe the text color (black, white, other)
    - Is there sufficient contrast? (visual assessment only)
 
 ### **Important:**
 - Be as precise as possible with pixel measurements
-- X-HEIGHT is the measurement criterion (lowercase letters, NOT capitals)
+- VISIBLE FONT HEIGHT is the measurement criterion (what a consumer sees, not x-height)
 - If no clear measurements possible, indicate "unclear" with your reasoning
 - Assume package size is {package_size_ml} ml for font size thresholds
 """
@@ -581,19 +576,17 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
 CLP_VALIDATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "font_size_pixels": {"type": "number", "description": "Measured font height in pixels"},
-        "font_size_mm": {"type": "number", "description": "Calculated font size in mm"},
+        "font_size_pixels": {"type": "number", "description": "Measured visible font height in pixels (baseline to top of tallest character)"},
+        "font_size_mm": {"type": "number", "description": "Calculated visible font size in mm"},
         "line_distance_pixels": {"type": "number", "description": "Measured baseline-to-baseline distance in pixels"},
         "line_distance_mm": {"type": "number", "description": "Calculated line distance in mm"},
         "background_color": {"type": "string", "description": "Described background color"},
         "text_color": {"type": "string", "description": "Described text color"},
         "contrast_assessment": {"type": "string", "description": "Contrast quality (high/medium/low)"},
         "measurement_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How confident in measurements (0-1)"},
-        "measurement_method": {"type": "string", "enum": ["x-height-direct", "cap-height-estimated", "unclear"], "description": "Method: x-height-direct (measured lowercase), cap-height-estimated (from all-caps with estimate), unclear (unmeasurable)"},
-        "estimated_xheight_mm": {"type": "number", "description": "If measurement_method is 'cap-height-estimated', this is the estimated x-height in mm (cap-height-mm × 0.70)"},
         "notes": {"type": "string", "description": "Any ambiguities or special observations"}
     },
-    "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence", "measurement_method"]
+    "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence"]
 }
 
 def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
@@ -1718,26 +1711,8 @@ If no measurement line is found, set measurement_line to null.
             
             # ⭐ X-HEIGHT CONFIDENCE-BASED CORRECTION
             # With improved prompt, Gemini should measure x-height correctly.
-            # But if confidence is borderline, apply gentle correction to reduce upward bias.
-            # This is empirically calibrated: vision models tend to measure ~2-3% high.
-            
-            def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
-                """Dynamic correction based on measurement method and confidence.
-                
-                SMART LOGIC:
-                - If cap-height-estimated: apply 0.70x to convert cap-height to x-height
-                - If x-height-direct + high confidence (>=0.85): no correction (1.0x)
-                - If x-height-direct + medium confidence (0.7-0.85): gentle correction (0.98x)
-                - If x-height-direct + low confidence (<0.7): no correction (1.0x)
-                """
-                if 'cap-height' in method.lower():
-                    return 0.70  # Cap-height reported: convert to x-height estimate
-                elif confidence >= 0.85:
-                    return 1.0   # Confident direct x-height, no correction needed
-                elif confidence >= 0.70:
-                    return 0.98  # Gentle correction for borderline cases
-                else:
-                    return 1.0   # Don't correct uncertain measurements
+            # We now measure visible font height directly, no correction needed.
+            # Vision models are generally accurate when measuring clear text.
             
             # Safely extract measurements with numeric coercion
             # NOTE: Correction factor is applied AFTER scale factor (below),
@@ -1771,16 +1746,6 @@ If no measurement line is found, set measurement_line to null.
             except (ValueError, TypeError):
                 meas_conf = 0
             
-            # ⭐ CHECK: If Gemini provided estimated_xheight_mm (for cap-height-estimated method),
-            # we'll use that DIRECTLY instead of applying manual correction
-            estimated_xheight_mm = None
-            try:
-                estimated_xheight_mm = float(measurements.get('estimated_xheight_mm') or 0)
-                if estimated_xheight_mm > 0:
-                    logger.info(f"  ℹ️  Gemini provided estimated x-height: {estimated_xheight_mm:.4f}mm")
-            except (ValueError, TypeError):
-                estimated_xheight_mm = None
-            
             # CRITICAL FIX: Apply scale factor to pixel measurements
             # If Gemini resized the image, pixel coordinates are in resized space.
             # We must scale them back to original image space before mm conversion.
@@ -1811,42 +1776,19 @@ If no measurement line is found, set measurement_line to null.
                 measurements['line_distance_pixels_scaled'] = line_dist_px_original
                 measurements['scale_factor_applied'] = scale_factor
             
-            # ⭐ Apply x-height correction LAST (after scale factor recalculation)
-            # PRIORITY: Use Gemini's estimated_xheight_mm if provided (new smart method)
-            font_mm_before_correction = font_mm
-            measurement_method = measurements.get('measurement_method', 'x-height-direct')
-            
-            if estimated_xheight_mm and estimated_xheight_mm > 0:
-                # BEST: Use Gemini's explicit estimate (already includes 0.70× correction)
-                font_mm = estimated_xheight_mm
-                correction = 1.0  # Already corrected by Gemini
-                logger.info(f"  ✓ Using Gemini's estimated x-height: {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm")
-            else:
-                # FALLBACK: Apply automatic correction based on method + confidence
-                correction = get_correction_factor(meas_conf_raw, measurement_method)
-                font_mm = font_mm * correction
-                if correction != 1.0:
-                    logger.info(f"  🔧 Applied correction ({correction:.2f}x, method={measurement_method}): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
-            
-            # CRITICAL: Update measurements dict with corrected value for rule validation
-            measurements['font_size_mm'] = font_mm
-            measurements['font_size_mm_before_correction'] = font_mm_before_correction
-            measurements['correction_factor_applied'] = correction
-            
-            if correction == 1.0 and not estimated_xheight_mm:
-                logger.info(f"  ✓ X-height measured (no correction needed): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
+            # ✓ Visible font height is now measured directly - no correction needed
+            logger.info(f"  ✓ Visible font height measured directly: {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # Get actual cropped image dimensions for logging
             cropped_w, cropped_h = cropped_image.width, cropped_image.height
             
             # DEBUG: Log all values for troubleshooting
-            measurement_method = measurements.get('measurement_method', 'x-height')
-            logger.info(f"  ✓ Gemini measurements (X-HEIGHT OPTIMIZED):")
+            logger.info(f"  ✓ Gemini measurements (VISIBLE FONT HEIGHT):")
             logger.info(f"    [CALIBRATION] DPI={self.calibration.true_dpi}, dpmm={self.calibration.dpmm:.4f}, calibrated={self.calibration.is_calibrated}")
             logger.info(f"    [CROP] {cropped_w}×{cropped_h}px")
-            logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm (method: {measurement_method})")
+            logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → final: {font_mm:.4f}mm (baseline to top of tallest character)")
             logger.info(f"    [MEASUREMENT] Line: {line_dist_px:.1f}px → {line_dist_mm:.4f}mm")
-            logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}, x-height correction applied={meas_conf_raw >= 0.7}")
+            logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}")
             
             logger.info(f"    [SUMMARY] Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm, BG={measurements.get('background_color', '?')}, Contrast={measurements.get('contrast_assessment', '?')}")
             if measurements.get('notes'):
