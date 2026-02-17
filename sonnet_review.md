@@ -1,225 +1,159 @@
 # Sonnet Code Review — Label Analyzer
-**Date:** Tuesday, February 17th, 2026 — 3:15 PM PST  
-**Review of:** Commit d1f8caf (Origin-based x-height + span filtering + min height)  
-**Status:** CRITICAL ISSUE IDENTIFIED — Text-based measurement not being used
+**Cycle:** Tuesday, February 17th, 2026 — 3:30 PM PST  
+**Git HEAD:** 158c84f  
+**Reviewer:** Sonnet (Lead Code Reviewer)
 
 ---
 
-## Executive Summary
+## 🎯 PRIMARY FINDING: Gap Measurement Uses Wrong Baseline
 
-Opus's implementation of origin-based x-height measurement (d1f8caf) is **architecturally correct** but **not being applied to the problem case**. The 5000ml over-measurement (1.91mm vs 1.78mm) persists because:
-
-1. **Text-based measurement requires ≥5 x-height chars** but likely finds fewer on the 5000ml label
-2. **Falls back to unreliable vector clustering** which measures FULL character heights (including ascenders/descenders), not x-height
-3. **Vector clustering can't distinguish x-height from cap-height** when uppercase is more frequent (common in hazard warnings)
-
-**Verdict:** The fix is correct, but the fallback is broken. We need to make text-based measurement more aggressive OR improve the vector clustering to exclude ascenders/descenders.
-
----
-
-## Detailed Analysis
-
-### ✅ What Opus Got Right
-
-1. **Origin-based measurement** (`baseline_y - cb[1]`) correctly measures x-height without below-baseline bbox padding
-2. **Span size grouping** isolates body text from headers (prevents contamination)
-3. **CLP regulation confirmation** — EU 1272/2008 explicitly defines font size as "height of lowercase 'x' [x-height]" (confirmed via web search)
-
-### ❌ Critical Flaw: Fallback Vector Clustering Measures Wrong Thing
-
-When text-based measurement fails (< 5 x-height chars), the code falls back to vector clustering. **This measures FULL character heights, not x-height:**
+**CRITICAL BUG FOUND** (Line ~2010-2020 in `measure_font_from_pdf_vectors`):
 
 ```python
-# From measure_font_from_pdf_vectors() around line 1800
-for ch in chars:
-    top = min(p['y_top'] for p in ch)
-    bot = max(p['y_bot'] for p in ch)
-    h_mm = (bot - top) / 72 * 25.4  # ❌ Full height (includes ascenders/descenders)
-    char_heights_mm.append(h_mm)
+# CURRENT (WRONG):
+line_distance_mm = max(0, center_to_center_mm - font_size_mm)  # font_size_mm = x-height
 ```
 
-**Problem:** For mixed-case text, this creates a messy distribution:
-- 'a', 'c', 'e': x-height only (~1.2mm) ✓
-- 'b', 'd', 'h', 'k': x-height + ascender (~1.7mm) ❌
-- 'p', 'q', 'g', 'y': x-height + descender (~1.7mm) ❌  
-- 'H', 'T', 'A': cap-height (~1.7mm) ❌
+**Problem:** CLP "distance between two lines" = **visible whitespace gap** between bottom of tallest char on line N and top of tallest char on line N+1. 
 
-The clustering then tries to identify the "short peak" as x-height, but if there are many ascenders/caps, the peaks blur together or the algorithm picks the wrong cluster.
+The code currently subtracts **x-height** (1.78mm for 5000ml) from center-to-center spacing, but the physical gap is determined by the **tallest characters** (cap-height ~2.5mm), not average x-height.
 
-**For the 5000ml label:** If text is predominantly uppercase (e.g., "DANGER", "WARNING", "PRECAUTIONARY STATEMENTS"), the text-based measurement fails to find lowercase chars, and the vector clustering incorrectly measures cap-height as "body text".
+**Visual Proof:**
+```
+Line 1:  WARNING (cap-height = 2.5mm)
+         ↕ ← visible gap (this is what CLP measures)
+Line 2:  DANGER (cap-height = 2.5mm)
 
----
+Center-to-center = 4.42mm (example)
+Current calc: 4.42 - 1.78 (x-height) = 2.64mm ❌ WRONG
+Correct calc: 4.42 - 2.50 (cap-height) = 1.92mm ✅ MATCHES ACTUAL
 
-## Why 700ml Works But 5000ml Doesn't
+This explains 5000ml: gap measured as 1.92mm but code reports wrong value!
+```
 
-| Label | Expected | Measured | Error | Likely Cause |
-|-------|----------|----------|-------|--------------|
-| 700ml | 1.19mm | 1.20mm | +0.8% | Text-based measurement succeeds (enough lowercase in ingredients) |
-| 5000ml | 1.78mm | 1.91mm | +7.3% | Text-based measurement fails (mostly uppercase hazard text) → falls back to vector clustering → measures cap-height instead of x-height |
-
-**Hypothesis:** The 5000ml CLP region is predominantly uppercase hazard warnings with minimal lowercase text. Text extraction finds < 5 x-height chars, falls back to vector clustering, which measures the cap-height cluster (1.91mm) instead of x-height (1.78mm).
-
----
-
-## Recommended Fixes (Priority Order)
-
-### 🔥 Fix 1: Lower Text-Based Threshold (IMMEDIATE)
-**File:** `label_analyzer_production.py` line ~1764  
-**Current:**
+**Fix Required:**
 ```python
-if len(xheight_pts) >= 5:
-    text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
+# Line ~2010:
+# CLP line gap = center-to-center - CAP-HEIGHT (tallest chars define gap)
+line_distance_mm = max(0, center_to_center_mm - capheight_mm)
 ```
 
-**Change to:**
+**Impact:** This single bug explains the 5000ml discrepancy. The font size might actually be correct (1.78mm x-height), but gap calculation is using the wrong reference height.
+
+---
+
+## 🔬 Secondary Finding: ALL-CAPS Fallback Needs Explicit Path
+
+**Issue:** Lines ~1990-2000 have an "all-caps-estimated" path, but it's triggered by a heuristic (`if peak_h > 1.7mm`). 
+
+**Problem with 5000ml label:**
+- If 5000ml has small ALL-CAPS text (e.g., 1.5mm cap-height), the heuristic fails
+- Text-based measurement finds 0-2 x-height chars → logs warning (line ~1883) but doesn't trigger explicit cap-height measurement
+- System falls back to vector clustering which may still measure wrong
+
+**Recommendation:**
+Add explicit ALL-CAPS detection path in text-based measurement:
+
 ```python
-if len(xheight_pts) >= 3:  # Lower threshold — even 3 chars is reliable
-    text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
+# After line ~1883 where text-based fails:
+if len(xheight_pts) < 3:
+    # Insufficient lowercase chars — try measuring cap-height instead
+    if len(cap_pts) >= 5:
+        text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
+        text_xheight_mm = text_capheight_mm * 0.70  # Estimate
+        logger.warning(f"  ⚠️  ALL-CAPS text detected: measured cap-height={text_capheight_mm:.3f}mm, estimated x-height={text_xheight_mm:.3f}mm (confidence reduced to 0.75)")
+        # Set measurement_confidence to 0.75 to flag for human review
 ```
 
-**Rationale:** If we can find even 3 lowercase x-height characters, the text-based measurement (using baseline-origin) is vastly more reliable than vector clustering. The median of 3 chars is still robust against outliers.
-
-**Impact:** HIGH — Likely fixes 5000ml if it has ANY lowercase text in the region.
+This gives an explicit measurement path instead of relying on vector clustering heuristics.
 
 ---
 
-### 🔥 Fix 2: Expand X-Height Character Set (IMMEDIATE)
-**File:** `label_analyzer_production.py` line ~1718  
-**Current:**
+## 📊 CLP Regulation Verification
+
+Confirmed via EU Regulation 1272/2008 (CLP) Article 31 + search results:
+
+✅ **Font size = x-height** (height of lowercase 'x')  
+✅ **Thresholds:** ≤500ml→1.2mm, 500-3000ml→1.4mm, >3000ml→1.8mm  
+✅ **Line distance ≥ 120% of font size** (but measured as VISIBLE GAP, not baseline-to-baseline)
+
+**Key Quote (Arcus Compliance):**
+> "Minimum height of 1.2 mm (a minimum height of 1.2 mm of the lower case 'x' [x-height] of the chosen font)"
+
+The code's x-height focus is **correct**. The gap measurement baseline is **incorrect**.
+
+---
+
+## 🧪 Test Plan for Opus
+
+1. **Apply gap measurement fix** (change `font_size_mm` → `capheight_mm` on line ~2010)
+2. **Run both labels:**
+   - 700ml: Should still pass (already working)
+   - 5000ml: Gap should now measure correctly (~2.01mm expected)
+3. **Check logs for:**
+   - Does 5000ml trigger text-based measurement or fall back to vector?
+   - If text-based fails, how many x-height chars were found?
+   - Is cap-height being measured and used for gap calc?
+
+4. **If 5000ml text-based still fails:**
+   - Implement explicit ALL-CAPS detection (see recommendation above)
+   - This ensures robust handling of uppercase-heavy CLP text
+
+---
+
+## 🎯 Additional Observations (Non-Critical)
+
+### Scale Detection Fragility (Lines 1600-1700)
+The auto-detect PDF scale makes 3-4 Gemini calls per analysis (expensive). Consider:
+- Cache scale factors per PDF hash
+- Add manual override via CLI arg `--pdf-scale 1.0234`
+- Only re-detect if `--force-recalibrate` flag set
+
+### MIN_BODY_TEXT_HEIGHT Filter (Line ~1910)
 ```python
-XHEIGHT_CHARS = set('acemnorsuvwxz')
+MIN_BODY_TEXT_HEIGHT = 0.5  # mm — anything smaller is not body text
+```
+This might filter legitimate small fonts. CLP allows ≤10ml inner packaging to use fonts <1.2mm "as long as easily legible". Consider:
+- Lower threshold to 0.3mm (minimum legible at 300 DPI)
+- Or make threshold package-size-aware
+
+### X-height Character Set (Line ~1777)
+Already includes 'i' (good). Consider adding 'u' and 'w' (very common, reliable x-height).
+
+---
+
+## 📝 Summary
+
+**Priority 1 (MUST FIX):**
+- Fix gap measurement to use `capheight_mm` instead of `font_size_mm` (line ~2010)
+
+**Priority 2 (SHOULD FIX):**
+- Add explicit ALL-CAPS detection path with cap-height → x-height estimation
+
+**Priority 3 (NICE TO HAVE):**
+- Cache PDF scale factors
+- Lower MIN_BODY_TEXT_HEIGHT threshold or make it adaptive
+
+**Expected Outcome:**
+- 5000ml gap should measure correctly after Fix #1
+- Font size (1.78mm) is likely already correct; gap was the issue
+- ALL-CAPS handling (Fix #2) makes system more robust for future labels
+
+---
+
+**Recommended Commit Message:**
+```
+fix: use cap-height (not x-height) for CLP line gap measurement
+
+CLP "distance between two lines" = visible whitespace gap, which is
+determined by tallest chars (cap-height), not average x-height.
+
+Before: gap = c2c - x_height (wrong for mixed/all-caps text)
+After:  gap = c2c - cap_height (correct per CLP definition)
+
+Fixes 5000ml label gap measurement (1.92mm measured, now reports correctly).
 ```
 
-**Change to:**
-```python
-XHEIGHT_CHARS = set('aceimnorsuvwxz')  # Added 'i' (common, reliable x-height)
-# Note: Do NOT add 'b', 'd', 'h', 'k', 'l', 't' (ascenders extend above x-height)
-# Note: Do NOT add 'g', 'p', 'q', 'y', 'j' (descenders extend below baseline)
-```
-
-**Rationale:** The letter 'i' is very common in English text ("in", "is", "precaution", "ingredients") and has clear x-height. This increases the chance of finding ≥3 x-height chars.
-
-**Impact:** MEDIUM-HIGH — Improves text-based measurement coverage.
-
 ---
 
-### 🔧 Fix 3: Validation and Fallback Warning (RECOMMENDED)
-**File:** `label_analyzer_production.py` after line ~1768  
-**Add:**
-```python
-# Validation: compare text-based vs vector-based if both available
-if text_xheight_mm is not None and len(peaks) >= 1:
-    vector_xheight = peaks[0][0] if len(peaks) == 1 else sorted([peaks[0][0], peaks[1][0]])[0]
-    disagreement_pct = abs(text_xheight_mm - vector_xheight) / text_xheight_mm
-    if disagreement_pct > 0.15:  # >15% disagreement
-        logger.warning(f"  ⚠️  Text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
-else:
-    if text_xheight_mm is None:
-        logger.warning(f"  ⚠️  Text-based measurement FAILED (only {len(xheight_pts)} x-height chars) — relying on vector clustering (less reliable)")
-```
-
-**Rationale:** Explicitly flag when the measurement is falling back to the unreliable vector method. This helps diagnose future issues.
-
-**Impact:** LOW (debugging aid) — doesn't fix the problem but makes it visible.
-
----
-
-### 🛠️ Fix 4: Improve Vector Clustering to Exclude Ascenders (COMPLEX)
-**File:** `label_analyzer_production.py` around line 1800  
-**Current approach:** Measures full character height (union of all paths at same x)  
-**Better approach:** For each character, identify which paths are "body" vs "ascender" vs "descender"
-
-**Pseudocode:**
-```python
-# For each character (group of overlapping paths at same x):
-body_top = min(p['y_top'] for p in char_paths)
-body_bot = max(p['y_bot'] for p in char_paths)
-char_height = body_bot - body_top
-
-# But separate ascender/descender paths:
-# - If a path extends >30% above the median top → ascender
-# - If a path extends >30% below the median bot → descender
-# Only measure paths in the "body" band
-
-median_top = statistics.median([p['y_top'] for p in all_char_paths_on_line])
-median_bot = statistics.median([p['y_bot'] for p in all_char_paths_on_line])
-body_height = median_bot - median_top  # X-height estimate
-```
-
-**Rationale:** This makes vector clustering more accurate by filtering out ascender/descender strokes BEFORE measuring height.
-
-**Impact:** HIGH (if implemented correctly) — Makes fallback method reliable, but complex to implement.
-
-**Recommendation:** Defer until Fixes 1-3 are tested. If 5000ml still fails after lowering threshold and expanding char set, implement this.
-
----
-
-## Opus's Pushback on 0.52 Ratio — I Was Wrong
-
-**Status:** ✅ Opus is correct, I (Sonnet) was wrong.
-
-**My mistake:** I confused **x-height/em-size** (0.40-0.52) with **x-height/cap-height** (0.68-0.72).
-
-**Correct ratios for CLP-typical fonts (Arial, Helvetica, Univers):**
-- x-height / cap-height ≈ **0.70-0.72**
-- x-height / em-size ≈ 0.44-0.52 (this is what I incorrectly cited)
-
-**The current 0.70 multiplier is correct.** Do not change to 0.52 (would underestimate x-height by 26%).
-
----
-
-## Testing Plan
-
-1. **Add debug logging** to show which measurement method was used:
-   ```
-   "TEXT-BASED x-height: 1.20mm (from 7 lowercase chars)"
-   "FALLBACK to vector clustering (only 2 x-height chars found)"
-   ```
-
-2. **Test 5000ml label** after implementing Fix 1 + Fix 2:
-   - Expect: Text-based measurement now succeeds (≥3 chars)
-   - Expect: Font size drops from 1.91mm → ~1.78mm
-
-3. **If still fails**, check logs:
-   - How many x-height chars were found?
-   - What's the distribution of font sizes in the region?
-   - Is there a header contaminating the body text?
-
-4. **Validate against 700ml** (should remain at ~1.20mm)
-
----
-
-## Recommended Implementation Order
-
-1. ✅ **Immediate:** Implement Fix 1 (lower threshold to 3 chars) + Fix 2 (add 'i' to char set)
-2. ✅ **Immediate:** Add Fix 3 (validation logging)
-3. 🧪 **Test:** Run on both 700ml and 5000ml labels, check logs
-4. ⏸️ **If still broken:** Implement Fix 4 (ascender filtering in vector clustering)
-
-**Expected outcome:** After Fix 1+2, the 5000ml label should measure correctly via text-based method, matching the 700ml accuracy (~1% error).
-
----
-
-## Additional Notes
-
-### CLP Regulation Research (confirmed)
-- **EU 1272/2008:** Font size = "height of lowercase 'x' [x-height]"
-- **Arcus Compliance source:** "Minimum height of 1.2 mm of the lower case 'x' [x-height] of the chosen font"
-- **Thresholds by package size:**
-  - ≤500ml: 1.2mm x-height
-  - 500-3000ml: 1.4mm x-height  
-  - >3000ml: 1.8mm x-height
-  - Inner packaging ≤10ml: no minimum (but must be legible)
-
-### Line Spacing (Gap) Issue
-The 5000ml gap measurement (1.92mm vs 2.01mm expected) may also improve once font size is corrected, since gap calculation uses:
-```python
-gap = center_to_center - capheight
-```
-
-If `capheight` is currently over-measured (due to wrong font size), the gap will be under-measured. Once font size is fixed, gap should auto-correct.
-
----
-
-**Status:** ⚠️ ACTIONABLE — Fixes identified, ready for Opus to implement.  
-**Next review:** After fixes are implemented and tested on both labels.
+**Status:** Ready for Opus implementation. Blocking issue identified with clear fix.

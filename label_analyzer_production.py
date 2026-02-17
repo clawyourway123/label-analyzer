@@ -1862,6 +1862,68 @@ If no clear number is visible, return 0."""
                         text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
                         logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
                         logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
+                    
+                    # STEP 4: Glyph-based x-height refinement using embedded font metrics
+                    # PyMuPDF Font.glyph_bbox() gives the precise glyph outline bbox,
+                    # which avoids char-level bbox padding that inflates origin-based measurement.
+                    # This is the GOLD STANDARD for x-height measurement.
+                    try:
+                        glyph_xheight_mm = None
+                        # Get font info from the body text spans
+                        if body_spans:
+                            sample_span = body_spans[0]
+                            font_name = sample_span.get('font', '')
+                            font_size_pt = sample_span.get('size', 0)
+                            
+                            # Try to extract embedded font from PDF
+                            fonts_on_page = page2.get_fonts(full=True)
+                            font_xref = None
+                            for f in fonts_on_page:
+                                # f = (xref, ext, type, basefont, name, encoding, ...)
+                                if len(f) >= 5 and (f[3] == font_name or f[4] == font_name):
+                                    font_xref = f[0]
+                                    break
+                            
+                            if font_xref:
+                                font_data = doc2.extract_font(font_xref)
+                                # font_data = (basename, ext, subtype, content_bytes)
+                                if font_data and len(font_data) >= 4 and font_data[3]:
+                                    font_obj = fitz.Font(fontbuffer=font_data[3])
+                                    # Get glyph bbox for 'x' — height gives x-height ratio
+                                    x_glyph_bbox = font_obj.glyph_bbox(ord('x'))
+                                    if x_glyph_bbox and x_glyph_bbox.height > 0:
+                                        # glyph_bbox is in font units (normalized to font size 1)
+                                        # Actual x-height = glyph_bbox.height * font_size_pt
+                                        glyph_xheight_pt = x_glyph_bbox.height * font_size_pt
+                                        glyph_xheight_mm = glyph_xheight_pt / 72 * 25.4
+                                        logger.info(f"  📐 GLYPH-BASED x-height: {glyph_xheight_mm:.3f}mm (font={font_name}, size={font_size_pt}pt, glyph_ratio={x_glyph_bbox.height:.4f})")
+                                        
+                                        # Also get cap-height from 'X' glyph
+                                        cap_glyph_bbox = font_obj.glyph_bbox(ord('X'))
+                                        if cap_glyph_bbox and cap_glyph_bbox.height > 0:
+                                            glyph_capheight_mm = cap_glyph_bbox.height * font_size_pt / 72 * 25.4
+                                            logger.info(f"  📐 GLYPH-BASED cap-height: {glyph_capheight_mm:.3f}mm (glyph_ratio={cap_glyph_bbox.height:.4f})")
+                                        
+                                        # Compare with origin-based measurement
+                                        diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm * 100 if glyph_xheight_mm > 0 else 0
+                                        logger.info(f"  📐 Origin vs Glyph x-height difference: {diff_pct:.1f}% (origin={text_xheight_mm:.3f}mm, glyph={glyph_xheight_mm:.3f}mm)")
+                                        
+                                        # If origin-based is >5% higher than glyph-based, prefer glyph
+                                        # (origin-based tends to over-measure due to bbox top padding)
+                                        if text_xheight_mm > glyph_xheight_mm * 1.05:
+                                            logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (origin-based {diff_pct:.1f}% too high, likely bbox padding)")
+                                            text_xheight_mm = glyph_xheight_mm
+                                            if cap_glyph_bbox and cap_glyph_bbox.height > 0:
+                                                text_capheight_mm = glyph_capheight_mm
+                                    else:
+                                        logger.debug(f"  📐 Glyph bbox for 'x' not available or zero height")
+                                else:
+                                    logger.debug(f"  📐 Could not extract font buffer for {font_name} (xref={font_xref})")
+                            else:
+                                logger.debug(f"  📐 Font '{font_name}' not found in page fonts for glyph-based measurement")
+                    except Exception as glyph_err:
+                        logger.debug(f"  📐 Glyph-based x-height measurement failed: {glyph_err}")
+                    
                 else:
                     logger.warning(f"  ⚠️  Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
                     if size_char_counts:
