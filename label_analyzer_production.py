@@ -1384,63 +1384,58 @@ class LabelAnalyzer:
         logger.info("Stage 0: DPI Calibration")
         
         prompt = """
-CRITICAL: Find the PRIMARY measurement reference line on this image.
+CRITICAL: Find ALL measurement reference lines on this image (there may be multiple).
 
-RULES FOR SELECTION (in priority order):
-1. LONGEST visible line with mm labels (prefer longest over shortest)
-2. MUST be a CONTINUOUS line (not broken or segmented)
-3. MUST have a clear numeric mm value label directly attached
-4. If multiple lines exist, pick the one that is MOST PROMINENT (clearest, boldest, most obviously a reference scale)
+For EACH line you find:
+- It must have a visible mm label (e.g., "636.07mm", "500mm", etc.)
+- Measure exact pixel coordinates of line start and end
+- Report the labeled mm value
 
-MEASUREMENT INSTRUCTIONS:
-- Measure the EXACT pixel coordinates of the line's start and end
-- Identify where the line begins (pixel x,y) and where it ends
-- Read the labeled mm value as precisely as possible
-- Be consistent: if you see the same line again, measure it the same way
+Return a list of all measurement lines found, ordered by length (longest first).
+DO NOT filter or pick one—return them ALL so we can select the best one.
 
-Return the following:
-- start_point: {x, y} pixel coordinates of line START (leftmost or topmost point)
-- end_point: {x, y} pixel coordinates of line END (rightmost or bottommost point)  
+For each line:
+- start_point: {x, y} pixel coordinates where line begins
+- end_point: {x, y} pixel coordinates where line ends
 - value_mm: The numeric mm value labeled on this line
-- confidence: How confident you are (0.0 to 1.0)
+- confidence: How confident (0.0 to 1.0)
 
-If no clear measurement line is found, set measurement_line to null.
+If no measurement lines found, return empty array.
 """
         
         calibration_schema = {
             "type": "object",
             "properties": {
-                "measurement_line": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "start_point": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
+                "measurement_lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_point": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "integer"},
+                                    "y": {"type": "integer"}
                                 },
-                                "end_point": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
-                                },
-                                "value_mm": {"type": "number"},
-                                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                "required": ["x", "y"]
                             },
-                            "required": ["start_point", "end_point", "value_mm", "confidence"]
+                            "end_point": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "integer"},
+                                    "y": {"type": "integer"}
+                                },
+                                "required": ["x", "y"]
+                            },
+                            "value_mm": {"type": "number"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
                         },
-                        {"type": "null"}
-                    ]
+                        "required": ["start_point", "end_point", "value_mm", "confidence"]
+                    },
+                    "description": "All measurement lines found, ordered by length (longest first)"
                 }
             },
-            "required": ["measurement_line"]
+            "required": ["measurement_lines"]
         }
         
         try:
@@ -1457,11 +1452,20 @@ If no clear measurement line is found, set measurement_line to null.
             response = json.loads(response_text)
             logger.debug(f"  ✓ Parsed JSON successfully")
             
-            if response.get("measurement_line"):
-                line_data = response["measurement_line"]
+            lines = response.get("measurement_lines", [])
+            if lines:
+                logger.info(f"  🎯 Found {len(lines)} measurement line(s), selecting longest...")
+                
+                # Find longest line (most reliable reference)
+                best_line = max(lines, key=lambda l: 
+                    ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                     (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
+                
+                line_data = best_line
                 px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
                               (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
-                logger.info(f"  🎯 Found measurement line (pre-scale): start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px, value={line_data['value_mm']}mm")
+                
+                logger.info(f"  ✓ Selected longest line: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px, value={line_data['value_mm']}mm")
                 
                 # CRITICAL: Scale coordinates back to original image space
                 # Gemini returns coordinates in its internally-resized space
@@ -1494,7 +1498,7 @@ If no clear measurement line is found, set measurement_line to null.
                     logger.info(f"✓ Calibration successful: {self.calibration.true_dpi} DPI")
                     return True
             
-            logger.info(f"✗ No measurement line found (response: {response}), using default {self.original_dpi} DPI")
+            logger.info(f"✗ No measurement lines found (response: {response}), using default {self.original_dpi} DPI")
             return False
             
         except json.JSONDecodeError as e:
