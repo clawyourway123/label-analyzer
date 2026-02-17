@@ -1757,6 +1757,10 @@ If no measurement line is found, set measurement_line to null.
                 font_px = float(measurements.get('font_size_pixels') or 0)
             except (ValueError, TypeError):
                 font_px = 0
+            
+            # Calculate what cap-height would be (for debugging)
+            # Cap-height is typically 1.48-1.5x x-height
+            estimated_cap_height_mm = font_mm_raw * 1.483 if font_mm_raw > 0 else 0
                 
             try:
                 line_dist_mm = float(measurements.get('line_distance_mm') or 0)
@@ -1848,9 +1852,16 @@ If no measurement line is found, set measurement_line to null.
             logger.info(f"    [CROP] {cropped_w}×{cropped_h}px")
             logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm (method: {measurement_method})")
             logger.info(f"    [MEASUREMENT] Line: {line_dist_px:.1f}px → {line_dist_mm:.4f}mm")
+            logger.info(f"    [CAP-HEIGHT DEBUG] Raw={font_mm_raw:.4f}mm, Estimated Cap-Height (raw×1.483)={estimated_cap_height_mm:.4f}mm, Final={font_mm:.4f}mm")
             logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}, x-height correction applied={meas_conf_raw >= 0.7}")
             
             logger.info(f"    [SUMMARY] Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm, BG={measurements.get('background_color', '?')}, Contrast={measurements.get('contrast_assessment', '?')}")
+            
+            # Extract and log cap-height if mentioned in notes
+            notes_text = measurements.get('notes', '')
+            if 'cap-height' in notes_text.lower():
+                logger.info(f"    [CAP-HEIGHT INFO] Found in notes: {notes_text}")
+            
             if measurements.get('notes'):
                 logger.info(f"    [NOTES] {measurements.get('notes')}")
             
