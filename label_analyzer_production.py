@@ -1373,15 +1373,86 @@ class LabelAnalyzer:
     # STAGE 0: CALIBRATION
     # ========================================================================
     
+    def calibrate_dpi_from_pdf(self, pdf_path: str) -> bool:
+        """
+        Calibrate DPI from PDF measurement lines using PyMuPDF (deterministic).
+        
+        Extracts horizontal lines from the PDF's vector content and matches them
+        against known reference values. This is 100% deterministic — no Gemini needed.
+        
+        Returns:
+            bool: True if calibration succeeded
+        """
+        try:
+            doc = fitz.open(pdf_path)
+            page = doc.load_page(0)
+            
+            # Extract all horizontal lines from PDF
+            drawings = page.get_drawings()
+            horiz_lines = []
+            for d in drawings:
+                for item in d["items"]:
+                    if item[0] == "l":  # line object
+                        p1, p2 = item[1], item[2]
+                        if abs(p1.y - p2.y) < 2:  # roughly horizontal
+                            length_pts = abs(p2.x - p1.x)
+                            if length_pts > 50:  # significant length
+                                length_mm = length_pts / 72 * 25.4
+                                horiz_lines.append((length_pts, length_mm))
+            
+            if not horiz_lines:
+                logger.info("  No vector measurement lines found in PDF, falling back to Gemini")
+                return False
+            
+            # Sort by length, take the most common length (measurement references appear multiple times)
+            from collections import Counter
+            rounded_lengths = Counter(round(l[0], 0) for l in horiz_lines)
+            most_common_length = rounded_lengths.most_common(1)[0][0]
+            
+            # Find lines matching most common length
+            matching = [l for l in horiz_lines if abs(l[0] - most_common_length) < 2]
+            avg_pts = sum(l[0] for l in matching) / len(matching)
+            physical_mm = avg_pts / 72 * 25.4
+            
+            # Calculate scale: PDF points per mm
+            pts_per_mm = avg_pts / physical_mm
+            standard_pts_per_mm = 72 / 25.4
+            scale_ratio = pts_per_mm / standard_pts_per_mm
+            
+            # True DPI = rendering DPI * scale ratio
+            true_dpi = int(round(self.original_dpi * scale_ratio))
+            
+            self.calibration.true_dpi = true_dpi
+            self.calibration.dpmm = true_dpi / 25.4
+            self.calibration.is_calibrated = True
+            
+            logger.info(f"  ✓ PDF vector calibration: {len(horiz_lines)} lines found, reference={physical_mm:.2f}mm")
+            logger.info(f"  ✓ Scale ratio: {scale_ratio:.4f} (1.0 = PDF is 1:1 physical)")
+            logger.info(f"  ✓ Calibrated DPI: {true_dpi} DPI ({self.calibration.dpmm:.2f} px/mm)")
+            doc.close()
+            return True
+            
+        except Exception as e:
+            logger.warning(f"  PDF vector calibration failed: {e}, falling back to Gemini")
+            return False
+    
     def calibrate_dpi(self, image: PIL_Image.Image, image_data: Dict) -> bool:
         """
-        Attempt to calibrate DPI from measurement lines in the image.
-        Updates self.calibration.
+        Attempt to calibrate DPI. 
+        
+        Priority:
+        1. PDF vector extraction (deterministic, exact)
+        2. Gemini vision (fallback for non-PDF images)
         
         Returns:
             bool: True if calibration succeeded, False if using default DPI
         """
         logger.info("Stage 0: DPI Calibration")
+        
+        # Try PDF-based calibration first (if we have a PDF path)
+        if hasattr(self, '_pdf_path') and self._pdf_path:
+            if self.calibrate_dpi_from_pdf(self._pdf_path):
+                return True
         
         prompt = """
 CRITICAL: Find ALL measurement reference lines on this image (there may be multiple).
@@ -2291,6 +2362,9 @@ If no measurement lines found, return empty array.
                     confidence_weights=confidence_weights,
                     use_cache=use_cache,
                 )
+                # Pass PDF path for deterministic DPI calibration
+                if path.lower().endswith(".pdf"):
+                    analyzer._pdf_path = path
                 parts = analyzer.analyze(img, image_data)
                 return BatchResult(
                     path=path, parts=parts, analyzer=analyzer,
@@ -2582,6 +2656,9 @@ def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer,
     image_data = image_to_base64(img)
     
     analyzer = LabelAnalyzer(project_id, dpi=image_dpi)
+    # Pass PDF path for deterministic DPI calibration
+    if image_path.lower().endswith(".pdf"):
+        analyzer._pdf_path = image_path
     parts = analyzer.analyze(img, image_data)
     
     return analyzer, parts
