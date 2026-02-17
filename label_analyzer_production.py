@@ -244,11 +244,15 @@ class DetectedPart:
         
         Only explicit "PASS" status counts as compliant.
         "SKIP" (too uncertain), "UNCLEAR", and "FAIL" all return False.
+        Non-CLP regions always return True (no compliance rules apply).
         """
+        # Non-CLP regions don't have strict compliance rules
+        if self.classification != PartClassification.CLP:
+            return True
+        
+        # For CLP regions, check if we have compliance data
         if not self.compliance_check:
             return False
-        if self.classification != PartClassification.CLP:
-            return True  # Non-CLP regions don't have strict compliance rules
         
         # Check overall_compliance from rule_results
         status = self.compliance_check.get("overall_compliance", "")
