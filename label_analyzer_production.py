@@ -1322,68 +1322,6 @@ If no measurement line is found, set measurement_line to null.
             return False
     
     # ========================================================================
-    # SANITY CHECK: DPI Validation
-    # ========================================================================
-    
-    def _sanity_check_dpi(self, image: PIL_Image.Image) -> None:
-        """
-        Verify that calibrated DPI matches expected label size.
-        
-        Typical product label sizes:
-        - Small: 50-100mm (100-1200px @ typical DPI)
-        - Medium: 100-300mm (1200-3600px @ typical DPI)
-        - Large: 300-500mm (3600-6000px @ typical DPI)
-        
-        If image is way too small/large relative to DPI, warn user.
-        """
-        img_w, img_h = image.size
-        dpmm = self.calibration.dpmm
-        
-        # Convert pixel dimensions to millimeters
-        label_width_mm = img_w / dpmm
-        label_height_mm = img_h / dpmm
-        max_dim_mm = max(label_width_mm, label_height_mm)
-        
-        # Sanity ranges (most product labels)
-        MIN_REALISTIC_MM = 20  # Smaller than 20mm is suspicious
-        MAX_REALISTIC_MM = 600  # Larger than 600mm is suspicious
-        
-        calibration_method = "measurement line" if self.calibration.is_calibrated else "metadata/default"
-        
-        logger.info(f"Stage 0a: DPI Sanity Check")
-        logger.info(f"  Image size: {img_w}×{img_h}px")
-        logger.info(f"  Calibration: {self.calibration.true_dpi} DPI ({self.calibration.dpmm:.4f} px/mm) via {calibration_method}")
-        logger.info(f"  Implied label size: {label_width_mm:.1f}×{label_height_mm:.1f}mm (max: {max_dim_mm:.1f}mm)")
-        
-        if max_dim_mm < MIN_REALISTIC_MM:
-            logger.warning(
-                f"  ⚠️  SUSPICIOUS: Label appears too small ({max_dim_mm:.1f}mm). "
-                f"This suggests:\n"
-                f"    - DPI is TOO HIGH (actual image DPI < {self.calibration.true_dpi})\n"
-                f"    - Image was downsampled before analysis\n"
-                f"    - PDF rendered at wrong resolution\n"
-                f"  ➜ Measurement accuracy may be DEGRADED by 2-10x"
-            )
-            if not self.calibration.is_calibrated:
-                logger.warning(
-                    f"  💡 REMEDY: If label has a measurement line, it will auto-calibrate (improving accuracy)"
-                )
-        elif max_dim_mm > MAX_REALISTIC_MM:
-            logger.warning(
-                f"  ⚠️  SUSPICIOUS: Label appears too large ({max_dim_mm:.1f}mm). "
-                f"This suggests:\n"
-                f"    - DPI is TOO LOW (actual image DPI > {self.calibration.true_dpi})\n"
-                f"    - Measurement line on label is mislabeled\n"
-                f"  ➜ Measurement accuracy may be DEGRADED by 2-10x"
-            )
-            if not self.calibration.is_calibrated:
-                logger.warning(
-                    f"  💡 REMEDY: Verify the measurement line label value; if wrong, measurements will be off"
-                )
-        else:
-            logger.info(f"  ✓ Label size appears reasonable ({max_dim_mm:.1f}mm)")
-
-    # ========================================================================
     # STAGE 1: ROUGH PART DETECTION
     # ========================================================================
     
@@ -1822,9 +1760,6 @@ If no measurement line is found, set measurement_line to null.
 
         # Stage 0a: Calibrate DPI
         self.calibrate_dpi(image, image_data)
-        
-        # Stage 0a-sanity: Check if DPI is reasonable
-        self._sanity_check_dpi(image)
         
         # Stage 0b: Detect package size (if not provided)
         if self.package_size_ml == 500 and self.package_size_confidence == 0.0:
