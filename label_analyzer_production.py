@@ -1378,10 +1378,25 @@ class LabelAnalyzer:
         Attempt to calibrate DPI from measurement lines in the image.
         Updates self.calibration.
         
+        For PDFs rendered at a known DPI (e.g., 300), we SKIP Gemini calibration 
+        and use the known rendering DPI directly. Gemini's pixel coordinate 
+        detection is fundamentally unreliable (64% variance on same reference line).
+        
+        For non-PDF images with unknown DPI, we fall back to Gemini detection.
+        
         Returns:
             bool: True if calibration succeeded, False if using default DPI
         """
         logger.info("Stage 0: DPI Calibration")
+        
+        # If DPI was explicitly set (e.g., from PDF rendering), trust it over Gemini
+        # PDF images are rendered at exact DPI (300 by default), so calibration is unnecessary
+        if self.original_dpi >= 150:  # Known DPI from PDF or image metadata
+            self.calibration.true_dpi = self.original_dpi
+            self.calibration.dpmm = self.original_dpi / 25.4
+            self.calibration.is_calibrated = True
+            logger.info(f"✓ Using known DPI: {self.original_dpi} DPI ({self.calibration.dpmm:.2f} px/mm) — skipping Gemini calibration")
+            return True
         
         prompt = """
 CRITICAL: Find ALL measurement reference lines on this image (there may be multiple).
