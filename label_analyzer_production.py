@@ -1721,14 +1721,9 @@ If no measurement line is found, set measurement_line to null.
             logger.info(f"    [MEASUREMENT] Line: {line_dist_px:.1f}px → {line_dist_mm:.4f}mm")
             logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}, x-height correction applied={meas_conf_raw >= 0.7}")
             
-            logger.info(f"  ✓ Gemini measurements:")
-            logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px)")
-            logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px)")
-            logger.info(f"    Background: {measurements.get('background_color', 'unknown')} text")
-            logger.info(f"    Contrast: {measurements.get('contrast_assessment', 'unknown')}")
-            logger.info(f"    Confidence: {meas_conf:.0%}")
+            logger.info(f"    [SUMMARY] Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm, BG={measurements.get('background_color', '?')}, Contrast={measurements.get('contrast_assessment', '?')}")
             if measurements.get('notes'):
-                logger.info(f"    Notes: {measurements.get('notes')}")
+                logger.info(f"    [NOTES] {measurements.get('notes')}")
             
             # Check if region is genuinely unreadable (all measurements are near-zero)
             is_unreadable = (font_mm < 0.1 and line_dist_mm < 0.1) or meas_conf < 0.1
