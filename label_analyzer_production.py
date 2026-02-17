@@ -723,8 +723,14 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
     is_black_text = any(word in text_color for word in ['black', 'dark', 'dark gray', 'dark grey', 'charcoal'])
     is_high_contrast = contrast_assess in ['high', 'very high', 'excellent']
     
-    # Accept: (White + Black) OR (Yellow + Black with high contrast)
-    contrast_pass = (is_white_bg and is_black_text) or (is_yellow_bg and is_black_text and is_high_contrast)
+    # Also accept: dark background + white/light text with high contrast
+    is_dark_bg = any(word in bg_color for word in ['dark', 'black', 'navy', 'purple', 'deep'])
+    is_white_text = any(word in text_color for word in ['white', 'light', 'cream', 'ivory'])
+    
+    # Accept: (White + Black) OR (Yellow + Black) OR (Dark bg + White text with high contrast)
+    contrast_pass = ((is_white_bg and is_black_text) or 
+                     (is_yellow_bg and is_black_text and is_high_contrast) or
+                     (is_dark_bg and is_white_text and is_high_contrast))
     contrast_status = "PASS" if contrast_pass else "FAIL"
     
     if contrast_pass:
@@ -1438,20 +1444,29 @@ class LabelAnalyzer:
             logger.info(f"  📐 Found {len(region_paths)} glyph paths in region")
             
             # Group paths into text lines by y_center
-            # Use adaptive tolerance: ~40% of most common path height
+            # CRITICAL: Compare against line MEDIAN y_center (not last element)
+            # to prevent chain-linking across adjacent lines when tall glyphs
+            # (descenders/ascenders) bridge the gap.
+            # Tolerance = 30% of most common path height (tight enough to separate
+            # lines spaced ~2mm apart with ~1.5mm tall glyphs)
             common_h = Counter(round(g['h'], 1) for g in region_paths).most_common(1)[0][0]
-            line_tolerance = max(1.0, common_h * 0.6)  # pts
+            line_tolerance = max(0.8, common_h * 0.4)  # pts — tighter than before
             
             region_paths.sort(key=lambda g: g['y_center'])
             text_lines = []
             current_line = [region_paths[0]]
+            current_line_y_median = region_paths[0]['y_center']
             for g in region_paths[1:]:
-                if abs(g['y_center'] - current_line[-1]['y_center']) < line_tolerance:
+                # Compare against line MEDIAN, not last element (prevents drift)
+                if abs(g['y_center'] - current_line_y_median) < line_tolerance:
                     current_line.append(g)
+                    # Update running median (use mean for speed)
+                    current_line_y_median = sum(p['y_center'] for p in current_line) / len(current_line)
                 else:
-                    if len(current_line) >= 3:  # Low threshold to avoid skipping short lines
+                    if len(current_line) >= 3:  # Low threshold to catch short lines
                         text_lines.append(current_line)
                     current_line = [g]
+                    current_line_y_median = g['y_center']
             if len(current_line) >= 3:
                 text_lines.append(current_line)
             
@@ -2104,9 +2119,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 return {
                     "measurements": measurements,
                     "rule_results": rule_results,
-                    "overall_compliance": "PASS" if all(
-                        r.get("pass") for r in rule_results.values() if r.get("applicable")
-                    ) else "FAIL",
+                    "overall_compliance": rule_results.get("overall_compliance", "FAIL"),
                     "measurement_time_seconds": round(val_time, 2),
                 }
             
