@@ -1761,7 +1761,63 @@ If no clear number is visible, return 0."""
                 logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
             
             # ================================================================
-            # BIMODAL HEIGHT CLUSTERING: Separate x-height from cap-height
+            # PRIMARY: Try text-based x-height measurement (uses actual char identities)
+            # ================================================================
+            # PyMuPDF get_text("rawdict") gives per-character bboxes WITH the actual
+            # character (e.g. 'a', 'x', 'H'). This lets us measure x-height directly
+            # from lowercase letters — no clustering heuristics needed.
+            text_xheight_mm = None
+            text_capheight_mm = None
+            try:
+                doc2 = fitz.open(pdf_path)
+                page2 = doc2.load_page(0)
+                rawdict = page2.get_text("rawdict")
+                
+                # X-height chars: lowercase letters without ascenders/descenders
+                XHEIGHT_CHARS = set('acemnorsuvwxz')
+                CAP_CHARS = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                
+                xheight_pts = []
+                cap_pts = []
+                
+                for block in rawdict.get('blocks', []):
+                    if block.get('type') != 0:  # text blocks only
+                        continue
+                    for line in block.get('lines', []):
+                        for span in line.get('spans', []):
+                            origin_y = span.get('origin', (0, 0))[1] if isinstance(span.get('origin'), (list, tuple)) else 0
+                            # Check if span is in our region
+                            sbbox = span.get('bbox', (0, 0, 0, 0))
+                            if (sbbox[0] >= pt_xmin - 2 and sbbox[2] <= pt_xmax + 2 and
+                                sbbox[1] >= pt_ymin - 2 and sbbox[3] <= pt_ymax + 2):
+                                # Process individual chars if available
+                                for ch_info in span.get('chars', []):
+                                    c = ch_info.get('c', '')
+                                    cb = ch_info.get('bbox', (0, 0, 0, 0))
+                                    ch_height_pt = cb[3] - cb[1]
+                                    if ch_height_pt > 0.3 and ch_height_pt < 20:
+                                        if c in XHEIGHT_CHARS:
+                                            xheight_pts.append(ch_height_pt)
+                                        elif c in CAP_CHARS:
+                                            cap_pts.append(ch_height_pt)
+                
+                doc2.close()
+                
+                if len(xheight_pts) >= 5:
+                    # Use median of x-height chars for robustness
+                    text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
+                    logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars)")
+                    if len(cap_pts) >= 3:
+                        text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
+                        logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
+                        logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
+                else:
+                    logger.info(f"  📐 Text extraction found only {len(xheight_pts)} x-height chars — falling back to vector clustering")
+            except Exception as e:
+                logger.debug(f"  📐 Text-based measurement failed: {e}")
+            
+            # ================================================================
+            # FALLBACK: Bimodal height clustering from vector paths
             # ================================================================
             # CLP requires X-HEIGHT (lowercase letters), not mean of all chars.
             # Mixed-case text has two clusters: short (x-height) and tall (caps/ascenders).
@@ -1770,32 +1826,47 @@ If no clear number is visible, return 0."""
             # Build histogram of body char heights (0.02mm bins)
             height_bins = Counter(round(h, 2) for h in body_char_heights)
             
-            # Cluster nearby bins (within 0.08mm) into groups, then find cluster centers
-            # This avoids the problem of adjacent bins both being "peaks"
+            # DEBUG: Show raw histogram (top 10 bins)
+            logger.info(f"  🔬 DEBUG: Height histogram (top 10):")
+            for h, c in height_bins.most_common(10):
+                logger.info(f"       {h:.2f}mm: {c} chars")
+            
+            # Cluster nearby bins (within 0.08mm) into groups
+            # Use MEDIAN for cluster center (prevents drift from outliers)
             sorted_heights = sorted(height_bins.keys())
-            clusters = []  # list of (weighted_center, total_count, [heights])
+            clusters = []  # list of [center, total_count, [member_heights]]
             for h in sorted_heights:
                 count = height_bins[h]
-                # Try to merge into existing cluster if close enough
                 merged = False
                 for cluster in clusters:
                     if abs(h - cluster[0]) <= 0.08:
-                        # Merge: update weighted center
-                        old_total = cluster[1]
-                        new_total = old_total + count
-                        cluster[0] = (cluster[0] * old_total + h * count) / new_total
-                        cluster[1] = new_total
-                        cluster[2].append(h)
+                        cluster[1] += count
+                        cluster[2].extend([h] * count)  # Add with multiplicity for proper median
                         merged = True
                         break
                 if not merged:
-                    clusters.append([h, count, [h]])
+                    clusters.append([h, count, [h] * count])
+            
+            # Recalculate centers as MEDIAN (prevents drift)
+            for cluster in clusters:
+                cluster[0] = statistics.median(cluster[2])
+            
+            # DEBUG: Show clusters after merging
+            logger.info(f"  🔬 DEBUG: Clusters after merging:")
+            for i, (center, count, members) in enumerate(clusters):
+                unique_members = sorted(set(members))
+                logger.info(f"       Cluster {i+1}: center={center:.3f}mm, count={count}, range={min(unique_members):.2f}-{max(unique_members):.2f}mm")
             
             # Convert to peaks: (center_height, total_count)
             peaks = [(c[0], c[1]) for c in clusters if c[1] >= 3]
             
             # Sort peaks by count (most common first)
             peaks.sort(key=lambda x: -x[1])
+            
+            # DEBUG: Show final peaks
+            logger.info(f"  🔬 DEBUG: Final peaks (sorted by count):")
+            for i, (h, c) in enumerate(peaks[:5]):
+                logger.info(f"       Peak {i+1}: {h:.3f}mm, {c} chars")
             
             logger.info(f"  📐 Height clusters: {[(round(h,3), n) for h, n in peaks[:5]]}")
             
@@ -1804,7 +1875,13 @@ If no clear number is visible, return 0."""
             capheight_mm = 0.0
             measurement_approach = 'single-peak'
             
-            if len(peaks) >= 2:
+            # If text-based measurement succeeded, use it as primary
+            if text_xheight_mm is not None:
+                xheight_mm = text_xheight_mm
+                capheight_mm = text_capheight_mm if text_capheight_mm else text_xheight_mm / 0.70
+                measurement_approach = 'text-rawdict-xheight'
+                logger.info(f"  📐 Using TEXT-BASED x-height: {xheight_mm:.3f}mm (most reliable)")
+            elif len(peaks) >= 2:
                 # Two peaks detected = bimodal distribution (mixed case)
                 # Smaller peak = x-height, larger peak = cap-height
                 p1_h, p1_count = peaks[0]
@@ -1813,36 +1890,38 @@ If no clear number is visible, return 0."""
                 # Sort by height (not count) to identify which is x-height vs cap-height
                 short_peak, tall_peak = sorted([p1_h, p2_h])
                 
-                # Sanity check: peaks should be reasonably separated (>0.3mm)
-                if tall_peak - short_peak > 0.3:
+                # Sanity check: peaks should be reasonably separated (>0.2mm)
+                # Lowered from 0.3mm — CLP fonts can have tighter cap/x ratios
+                if tall_peak - short_peak > 0.2:
                     xheight_mm = short_peak
                     capheight_mm = tall_peak
                     measurement_approach = 'bimodal-xheight'
-                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm (n={height_bins[short_peak]}), cap-height={capheight_mm:.3f}mm (n={height_bins[tall_peak]})")
+                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm, cap-height={capheight_mm:.3f}mm, separation={tall_peak-short_peak:.3f}mm")
                 else:
                     # Peaks too close, likely noise — fall back to single peak
                     xheight_mm = peaks[0][0]
                     capheight_mm = peaks[0][0]
                     logger.info(f"  📐 Peaks too close ({tall_peak - short_peak:.2f}mm), treating as single peak: {xheight_mm:.3f}mm")
             
-            if len(peaks) == 1:
+            if measurement_approach == 'single-peak' and len(peaks) == 1:
                 # Single peak — could be all-caps OR all-lowercase
                 peak_h = peaks[0][0]
                 
-                # Heuristic: if peak > 1.5mm, likely all-caps (estimate x-height via 0.70 ratio)
-                if peak_h > 1.5:
+                # Heuristic: if peak > 1.7mm, likely all-caps (estimate x-height via 0.70 ratio)
+                # Raised from 1.5mm to avoid false positives on legitimate x-heights near threshold
+                if peak_h > 1.7:
                     capheight_mm = peak_h
                     xheight_mm = peak_h * 0.70  # Typical cap-to-x-height ratio for sans-serif
                     measurement_approach = 'all-caps-estimated'
-                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (>1.5mm) — likely all-caps, estimating x-height = {xheight_mm:.3f}mm (70% ratio)")
+                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (>1.7mm) — likely all-caps, estimating x-height = {xheight_mm:.3f}mm (70% ratio)")
                 else:
                     # Likely all-lowercase or small font
                     xheight_mm = peak_h
                     capheight_mm = peak_h / 0.70  # Estimate cap-height for spacing calc
                     measurement_approach = 'single-peak-lowercase'
-                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (≤1.5mm) — treating as x-height")
+                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (≤1.7mm) — treating as x-height")
             
-            if len(peaks) == 0:
+            if measurement_approach == 'single-peak' and len(peaks) == 0:
                 # No clear peaks (very uniform or too few chars) — fall back to median
                 xheight_mm = statistics.median(body_char_heights)
                 capheight_mm = xheight_mm / 0.70
