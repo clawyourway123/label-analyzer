@@ -946,8 +946,12 @@ If you cannot find a size declaration, return value_in_ml=null with low confiden
             logger.info(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using default 500ml")
             return 500, 0.0  # Default fallback
             
-    except Exception as e:
+    except (APIError, json.JSONDecodeError, KeyError) as e:
         logger.warning(f"Package size detection failed: {e}, using default 500ml")
+        return 500, 0.0
+    except Exception as e:
+        logger.error(f"Unexpected error in package size detection: {type(e).__name__}: {e}")
+        logger.error("Stack trace:", exc_info=True)
         return 500, 0.0
 
 
@@ -1215,6 +1219,7 @@ class LabelAnalyzer:
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
         self._gemini_scale_factor: float = 1.0  # Track coordinate scaling
         self.package_size_ml: int = package_size_ml or 500  # Default fallback
+        self._image_cache: Dict[str, str] = {}  # Cache preprocessed images by hash
         self.package_size_confidence: float = 0.0  # Confidence in detected size
     
     def clear_cache(self) -> int:
@@ -1224,6 +1229,29 @@ class LabelAnalyzer:
             Number of cache entries removed
         """
         return self.gemini.cache.clear()
+    
+    def _get_or_cache_image(self, image: PIL_Image.Image) -> str:
+        """Get or cache base64-encoded image data.
+        
+        Args:
+            image: PIL Image object
+            
+        Returns:
+            base64-encoded image data (cached for repeated use)
+        """
+        # Create hash from image data
+        img_bytes = BytesIO()
+        image.save(img_bytes, format='PNG')
+        img_hash = hashlib.md5(img_bytes.getvalue()).hexdigest()
+        
+        if img_hash not in self._image_cache:
+            # First time seeing this image, encode and cache
+            self._image_cache[img_hash] = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+            logger.debug(f"  💾 Cached image (hash: {img_hash[:8]}...)")
+        else:
+            logger.debug(f"  ⚡ Using cached image (hash: {img_hash[:8]}...)")
+        
+        return self._image_cache[img_hash]
     
     def _scale_region_coordinates(self, region: Dict, scale_factor: float) -> Dict:
         """Scale region coordinates back to original image space.
@@ -1389,8 +1417,12 @@ If no measurement line is found, set measurement_line to null.
             logger.warning(f"  Raw response was: {response_text[:200]}")
             logger.warning(f"  Using default DPI: {self.original_dpi}")
             return False
-        except Exception as e:
+        except (APIError, KeyError) as e:
             logger.warning(f"Calibration failed: {type(e).__name__}: {e}, using default DPI")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error in calibration: {type(e).__name__}: {e}")
+            logger.error("Stack trace:", exc_info=True)
             return False
     
     # ========================================================================
@@ -1468,8 +1500,12 @@ If no measurement line is found, set measurement_line to null.
             
             return regions
             
-        except Exception as e:
+        except (APIError, json.JSONDecodeError, KeyError) as e:
             logger.error(f"Rough detection failed: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in rough detection: {type(e).__name__}: {e}")
+            logger.error("Stack trace:", exc_info=True)
             return []
     
     # ========================================================================
@@ -1557,8 +1593,12 @@ If no measurement line is found, set measurement_line to null.
                 logger.info(f"  ✓ Refined: {label} (no rect) irregular={refined['has_irregular_shape']}")
             return refined
             
-        except Exception as e:
+        except (APIError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Boundary refinement failed for '{label}': {e}, using rough boundaries")
+            return region
+        except Exception as e:
+            logger.error(f"Unexpected error in boundary refinement for '{label}': {type(e).__name__}: {e}")
+            logger.error("Stack trace:", exc_info=True)
             return region
     
     # ========================================================================
