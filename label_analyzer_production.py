@@ -1351,18 +1351,9 @@ class LabelAnalyzer:
         Attempt to calibrate DPI from measurement lines in the image.
         Updates self.calibration.
         
-        CRITICAL: Gemini's measurement line detection is unstable (finds different 
-        lines on same image each run). Once calibrated, we lock the DPI to avoid 
-        re-detection and inconsistent measurements downstream.
-        
         Returns:
             bool: True if calibration succeeded, False if using default DPI
         """
-        # If already calibrated, skip re-detection to avoid inconsistency
-        if self.calibration.is_calibrated:
-            logger.info(f"Stage 0: DPI Calibration - SKIPPED (already calibrated: {self.calibration.true_dpi} DPI)")
-            return True
-        
         logger.info("Stage 0: DPI Calibration")
         
         prompt = """
@@ -1460,8 +1451,6 @@ If no measurement line is found, set measurement_line to null.
                     if self.calibration.true_dpi < 50 or self.calibration.true_dpi > 1200:
                         logger.warning(f"  ⚠️  Calibrated DPI ({self.calibration.true_dpi}) is outside expected range (50-1200)")
                         logger.warning(f"      This might indicate a failed calibration. Consider manual review.")
-                        logger.warning(f"      Measurement line details: {px_distance_scaled:.1f}px for {line_data['value_mm']}mm")
-                        logger.warning(f"      If this varies across runs, calibration is unstable (Gemini finding different reference lines)")
                         logger.warning(f"      Measurement line: {line.value_mm}mm across {((line.end_point.x - line.start_point.x)**2 + (line.end_point.y - line.start_point.y)**2)**0.5:.1f}px")
                     
                     logger.info(f"✓ Calibration successful: {self.calibration.true_dpi} DPI")
