@@ -1380,6 +1380,135 @@ class LabelAnalyzer:
     # PDF VECTOR FONT MEASUREMENT (deterministic, no Gemini needed)
     # ========================================================================
     
+    def _auto_detect_pdf_scale(self, page, pdf_path: str):
+        """
+        Automatically detect PDF scale by OCR'ing dimension line labels.
+        
+        1. Find the top measurement lines (longest H/V vector lines)
+        2. Render a small crop around each line's label area
+        3. Ask Gemini to READ the mm value (OCR — reliable)
+        4. Scale = OCR'd value / vector length
+        """
+        import fitz
+        
+        all_drawings = page.get_drawings()
+        
+        # Collect measurement lines with their positions
+        h_lines = []  # (length_mm, y_pt, x_start_pt, x_end_pt)
+        v_lines = []  # (length_mm, x_pt, y_start_pt, y_end_pt)
+        for d in all_drawings:
+            for item in d.get('items', []):
+                if item[0] == 'l':
+                    p1, p2 = item[1], item[2]
+                    if abs(p1.y - p2.y) < 2:  # horizontal
+                        length_mm = abs(p2.x - p1.x) / 72 * 25.4
+                        if length_mm > 50:
+                            h_lines.append((length_mm, p1.y, min(p1.x, p2.x), max(p1.x, p2.x)))
+                    elif abs(p1.x - p2.x) < 2:  # vertical
+                        length_mm = abs(p2.y - p1.y) / 72 * 25.4
+                        if length_mm > 50:
+                            v_lines.append((length_mm, p1.x, min(p1.y, p2.y), max(p1.y, p2.y)))
+        
+        h_lines.sort(key=lambda x: -x[0])
+        v_lines.sort(key=lambda x: -x[0])
+        
+        # Take top 3 unique-length lines of each orientation
+        def unique_by_length(lines, tol=5):
+            seen = []
+            result = []
+            for line in lines:
+                if not any(abs(line[0] - s) < tol for s in seen):
+                    seen.append(line[0])
+                    result.append(line)
+                if len(result) >= 3:
+                    break
+            return result
+        
+        candidates = []
+        for line in unique_by_length(h_lines):
+            candidates.append(('horizontal', line[0], line[1], line[2], line[3]))
+        for line in unique_by_length(v_lines):
+            candidates.append(('vertical', line[0], line[1], line[2], line[3]))
+        
+        if not candidates:
+            logger.info("  📏 No measurement lines found for auto scale detection")
+            return
+        
+        logger.info(f"  📏 Auto scale: found {len(candidates)} candidate measurement lines")
+        
+        # Render crops around each measurement line and OCR the label
+        zoom = 3.0  # Render at high res for OCR readability
+        mat = fitz.Matrix(zoom, zoom)
+        
+        ocr_results = []
+        for orient, length_mm, pos, start, end in candidates[:4]:  # Max 4 to limit API calls
+            # Create a crop rect around the measurement line's label area
+            margin = 30  # pts around the line
+            if orient == 'horizontal':
+                # Label is usually above/below the line, near the center
+                mid_x = (start + end) / 2
+                clip = fitz.Rect(mid_x - 80, pos - margin, mid_x + 80, pos + margin)
+            else:
+                # Label is usually left/right of the line, near the center
+                mid_y = (start + end) / 2
+                clip = fitz.Rect(pos - margin, mid_y - 80, pos + margin, mid_y + 80)
+            
+            # Ensure clip is within page bounds
+            clip = clip & page.rect
+            if clip.is_empty:
+                continue
+            
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            img_bytes = pix.tobytes("png")
+            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+            
+            # Ask Gemini to read JUST the number
+            ocr_prompt = """Read the numeric measurement value shown in this image.
+This is a dimension label from technical artwork. It shows a measurement in millimeters.
+Return ONLY the numeric value (e.g., 172.75 or 636.07). 
+If you see "mm" after the number, ignore it.
+If no clear number is visible, return 0."""
+            
+            ocr_schema = {
+                "type": "object",
+                "properties": {
+                    "value_mm": {"type": "number", "description": "The numeric mm value read from the label"}
+                },
+                "required": ["value_mm"]
+            }
+            
+            try:
+                img_data = {"inline_data": {"mime_type": "image/png", "data": img_b64}}
+                response = self.gemini.analyze_image(img_data, ocr_prompt, ocr_schema, temperature=0.1)
+                result = json.loads(response)
+                read_value = result.get('value_mm', 0)
+                if read_value > 0:
+                    scale = read_value / length_mm
+                    ocr_results.append((orient, length_mm, read_value, scale))
+                    logger.info(f"  📏 OCR: {orient} line {length_mm:.2f}mm → label reads {read_value}mm → scale={scale:.4f}")
+            except Exception as e:
+                logger.warning(f"  ⚠️ OCR failed for {orient} {length_mm:.1f}mm line: {e}")
+                continue
+        
+        # Apply scales
+        v_scale = 1.0
+        h_scale = 1.0
+        for orient, vec_mm, real_mm, scale in ocr_results:
+            if 0.8 < scale < 1.3:  # Sanity check
+                if orient == 'vertical':
+                    v_scale = scale
+                else:
+                    h_scale = scale
+        
+        if not hasattr(self, '_pdf_scale_cache'):
+            self._pdf_scale_cache = {}
+        self._pdf_scale_cache[pdf_path] = (v_scale, h_scale)
+        
+        if v_scale != 1.0 or h_scale != 1.0:
+            logger.info(f"  📏 Auto-detected scales: vertical={v_scale:.4f}, horizontal={h_scale:.4f}")
+        else:
+            logger.info(f"  📏 PDF appears to be at 1:1 scale")
+    
     def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict) -> Optional[Dict]:
         """
         Measure font size directly from PDF vector paths (100% deterministic).
@@ -1406,15 +1535,23 @@ class LabelAnalyzer:
             page = doc.load_page(0)
             
             # ============================================================
-            # SCALE DETECTION: Check if PDF artwork is at 1:1 physical scale
+            # AUTO SCALE DETECTION from PDF measurement/dimension lines
             # ============================================================
-            # If user provided a reference dimension, compute scale factor.
-            # Font height uses VERTICAL scale (artwork may be non-uniformly scaled).
+            # PDFs may not be at 1:1 physical scale. Detect by:
+            # 1. Find measurement lines (longest H/V vector lines)
+            # 2. Render area around each line, ask Gemini to READ the mm label (OCR)
+            # 3. Scale = OCR'd value / vector length
+            # This is reliable because Gemini reads text well (unlike pixel measurement).
             vertical_scale = 1.0
             horizontal_scale = 1.0
             
-            if hasattr(self, '_reference_dimensions') and self._reference_dimensions:
-                # Find all significant vertical and horizontal lines in the PDF
+            # Use cached scale if already computed for this PDF
+            if hasattr(self, '_pdf_scale_cache') and pdf_path in self._pdf_scale_cache:
+                vertical_scale, horizontal_scale = self._pdf_scale_cache[pdf_path]
+                if vertical_scale != 1.0 or horizontal_scale != 1.0:
+                    logger.info(f"  📏 Using cached scale: v={vertical_scale:.4f}, h={horizontal_scale:.4f}")
+            elif hasattr(self, '_reference_dimensions') and self._reference_dimensions:
+                # MANUAL MODE: user provided known dimensions
                 all_drawings = page.get_drawings()
                 v_lines_mm = []
                 h_lines_mm = []
@@ -1422,37 +1559,31 @@ class LabelAnalyzer:
                     for item in d.get('items', []):
                         if item[0] == 'l':
                             p1, p2 = item[1], item[2]
-                            if abs(p1.y - p2.y) < 2:  # horizontal
+                            if abs(p1.y - p2.y) < 2:
                                 length = abs(p2.x - p1.x) / 72 * 25.4
                                 if length > 50:
                                     h_lines_mm.append(length)
-                            elif abs(p1.x - p2.x) < 2:  # vertical
+                            elif abs(p1.x - p2.x) < 2:
                                 length = abs(p2.y - p1.y) / 72 * 25.4
                                 if length > 50:
                                     v_lines_mm.append(length)
                 
-                # Match each reference to closest vector line
                 for ref in self._reference_dimensions:
                     ref_mm = ref['mm']
                     orientation = ref.get('orientation', 'auto')
-                    
-                    # Find best match
                     best_match = None
                     best_diff = float('inf')
                     
                     if orientation in ('vertical', 'auto'):
                         for v in v_lines_mm:
                             diff = abs(v - ref_mm)
-                            ratio = ref_mm / v if v > 0 else 999
-                            if diff < best_diff and 0.8 < ratio < 1.3:
+                            if diff < best_diff and 0.8 < ref_mm / v < 1.3:
                                 best_diff = diff
                                 best_match = ('vertical', v, ref_mm / v)
-                    
                     if orientation in ('horizontal', 'auto'):
                         for h in h_lines_mm:
                             diff = abs(h - ref_mm)
-                            ratio = ref_mm / h if h > 0 else 999
-                            if diff < best_diff and 0.8 < ratio < 1.3:
+                            if diff < best_diff and 0.8 < ref_mm / h < 1.3:
                                 best_diff = diff
                                 best_match = ('horizontal', h, ref_mm / h)
                     
@@ -1462,10 +1593,22 @@ class LabelAnalyzer:
                             vertical_scale = scale
                         else:
                             horizontal_scale = scale
-                        logger.info(f"  📏 Scale from ref {ref_mm}mm: {orient} line {vec_mm:.2f}mm → scale={scale:.4f}")
+                        logger.info(f"  📏 Scale from ref {ref_mm}mm: {orient} {vec_mm:.2f}mm → scale={scale:.4f}")
                 
-                if vertical_scale != 1.0 or horizontal_scale != 1.0:
-                    logger.info(f"  📏 Applied scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
+                if not hasattr(self, '_pdf_scale_cache'):
+                    self._pdf_scale_cache = {}
+                self._pdf_scale_cache[pdf_path] = (vertical_scale, horizontal_scale)
+            else:
+                # AUTO MODE: Find dimension lines and OCR their labels via Gemini
+                try:
+                    self._auto_detect_pdf_scale(page, pdf_path)
+                    if hasattr(self, '_pdf_scale_cache') and pdf_path in self._pdf_scale_cache:
+                        vertical_scale, horizontal_scale = self._pdf_scale_cache[pdf_path]
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Auto scale detection failed: {e}")
+            
+            if vertical_scale != 1.0 or horizontal_scale != 1.0:
+                logger.info(f"  📏 Scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
             
             # Convert pixel coordinates back to PDF points
             zoom = self.original_dpi / 72  # Same zoom used in pdf_to_image()
