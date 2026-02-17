@@ -1454,12 +1454,25 @@ If no measurement lines found, return empty array.
             
             lines = response.get("measurement_lines", [])
             if lines:
-                logger.info(f"  🎯 Found {len(lines)} measurement line(s), selecting longest...")
+                logger.info(f"  🎯 Found {len(lines)} measurement line(s)")
+                for i, l in enumerate(lines):
+                    dist = ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                           (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5
+                    logger.info(f"    Line {i+1}: {dist:.1f}px for {l['value_mm']}mm")
                 
-                # Find longest line (most reliable reference)
-                best_line = max(lines, key=lambda l: 
-                    ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
-                     (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
+                # Priority: 636.07mm reference (most common on CLP labels)
+                # If not found, use longest line
+                preferred_ref = 636.07
+                preferred_line = next((l for l in lines if abs(l["value_mm"] - preferred_ref) < 0.5), None)
+                
+                if preferred_line:
+                    best_line = preferred_line
+                    logger.info(f"  ✓ Using preferred reference: {preferred_line['value_mm']}mm")
+                else:
+                    best_line = max(lines, key=lambda l: 
+                        ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                         (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
+                    logger.info(f"  ⚠️  Preferred reference not found, using longest: {best_line['value_mm']}mm")
                 
                 line_data = best_line
                 px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
