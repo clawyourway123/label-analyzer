@@ -235,6 +235,24 @@ class DetectedPart:
     raw_response: Optional[Dict] = None
     compliance_check: Optional[Dict] = None  # CLP validation results
     
+    @property
+    def font_size_mm(self) -> float:
+        """Extract font size in mm from compliance check (0.0 if unavailable)."""
+        if self.compliance_check:
+            measurements = self.compliance_check.get("measurements", {})
+            try:
+                return float(measurements.get("font_size_mm") or 0)
+            except (ValueError, TypeError):
+                return 0.0
+        return 0.0
+    
+    @property
+    def compliance_status(self) -> str:
+        """Overall compliance status string (PASS/FAIL/SKIP/ERROR or N/A)."""
+        if self.compliance_check:
+            return self.compliance_check.get("overall_compliance", "N/A")
+        return "N/A"
+    
     def is_confident(self, threshold: float = 0.7) -> bool:
         """Check if detection meets confidence threshold"""
         return self.confidence >= threshold
@@ -1025,6 +1043,7 @@ class GeminiClient:
         self.max_retries = max_retries
         self._last_image_width: int = 0   # Track original image dimensions for coordinate denormalization
         self._last_image_height: int = 0
+        self._last_image_scale_factor: float = 1.0  # Scale factor for Gemini's internal resizing
     
     def _get_client(self):
         """Lazy-load Gemini client"""
@@ -2038,13 +2057,17 @@ If no measurement line is found, set measurement_line to null.
                 else:
                     img = PIL_Image.open(path)
                     # Extract DPI from image metadata if available
+                    # Ignore low DPI values (72/96) - they're JFIF/PNG defaults
                     image_dpi = dpi  # Default
                     if hasattr(img, 'info') and 'dpi' in img.info:
                         dpi_tuple = img.info['dpi']
+                        raw_dpi = None
                         if isinstance(dpi_tuple, (tuple, list)) and len(dpi_tuple) >= 1:
-                            image_dpi = int(dpi_tuple[0])
+                            raw_dpi = int(dpi_tuple[0])
                         elif isinstance(dpi_tuple, (int, float)):
-                            image_dpi = int(dpi_tuple)
+                            raw_dpi = int(dpi_tuple)
+                        if raw_dpi and raw_dpi >= 150:
+                            image_dpi = raw_dpi
 
                 image_data = image_to_base64(img)
                 analyzer = LabelAnalyzer(
@@ -2103,7 +2126,8 @@ If no measurement line is found, set measurement_line to null.
                     "rect": asdict(part.rect),
                     "has_polygon": part.polygon is not None,
                     "is_compliant": part.is_compliant(),
-                    "needs_review": part.needs_human_review()
+                    "needs_review": part.needs_human_review(),
+                    "compliance_check": part.compliance_check
                 }
                 for part in self.detected_parts
             ]
@@ -2136,15 +2160,26 @@ If no measurement line is found, set measurement_line to null.
         # Save CSV (easy spreadsheet import)
         csv_path = out_path / "analysis_results.csv"
         with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["label", "classification", "confidence", "compliant", "needs_review", "x_min", "y_min", "x_max", "y_max"])
+            writer = csv.DictWriter(f, fieldnames=[
+                "label", "classification", "confidence", "compliant", "needs_review",
+                "font_size_mm", "line_distance_mm", "measurement_confidence",
+                "overall_compliance", "x_min", "y_min", "x_max", "y_max"
+            ])
             writer.writeheader()
             for part in self.detected_parts:
+                # Extract measurements from compliance check if available
+                compliance = part.compliance_check or {}
+                measurements = compliance.get("measurements", {})
                 writer.writerow({
                     "label": part.label,
                     "classification": part.classification.value,
                     "confidence": f"{part.confidence:.2%}",
                     "compliant": part.is_compliant(),
                     "needs_review": part.needs_human_review(),
+                    "font_size_mm": f"{measurements.get('font_size_mm', ''):.4f}" if measurements.get('font_size_mm') else "",
+                    "line_distance_mm": f"{measurements.get('line_distance_mm', ''):.4f}" if measurements.get('line_distance_mm') else "",
+                    "measurement_confidence": f"{measurements.get('measurement_confidence', ''):.2%}" if measurements.get('measurement_confidence') else "",
+                    "overall_compliance": compliance.get("overall_compliance", ""),
                     "x_min": part.rect.xmin,
                     "y_min": part.rect.ymin,
                     "x_max": part.rect.xmax,
@@ -2192,10 +2227,19 @@ If no measurement line is found, set measurement_line to null.
                         width=5
                     )
                     
-                    # Add label at center
+                    # Add label with measurements at center
                     center_x = (xmin + xmax) // 2
                     center_y = (ymin + ymax) // 2
                     text = f"{part.label}\n({part.confidence:.0%})"
+                    
+                    # Add font size measurement if available
+                    if part.compliance_check:
+                        measurements = part.compliance_check.get("measurements", {})
+                        font_mm = measurements.get("font_size_mm")
+                        overall = part.compliance_check.get("overall_compliance", "")
+                        if font_mm:
+                            text += f"\n{font_mm:.2f}mm [{overall}]"
+                    
                     draw.text((center_x, center_y), text, fill=color)
                 else:
                     logger.warning(f"Skipped invalid box for {part.label}: ({xmin},{ymin})-({xmax},{ymax}) in {image.width}×{image.height} image")
@@ -2254,15 +2298,25 @@ def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer,
     img = PIL_Image.open(image_path)
     
     # Extract DPI from image metadata if available
+    # NOTE: 72 and 96 DPI are JFIF/PNG defaults, NOT real print DPI.
+    # Photos from cameras/web almost always report 72 DPI but actual
+    # print resolution is much higher. Only trust DPI >= 150.
     image_dpi = 300  # Default fallback
     if hasattr(img, 'info') and 'dpi' in img.info:
         dpi_tuple = img.info['dpi']
+        raw_dpi = None
         if isinstance(dpi_tuple, (tuple, list)) and len(dpi_tuple) >= 1:
-            image_dpi = int(dpi_tuple[0])  # Use X-DPI (usually same as Y-DPI)
-            logger.info(f"  ✓ Extracted DPI from image metadata: {image_dpi} DPI")
+            raw_dpi = int(dpi_tuple[0])
         elif isinstance(dpi_tuple, (int, float)):
-            image_dpi = int(dpi_tuple)
+            raw_dpi = int(dpi_tuple)
+        
+        if raw_dpi and raw_dpi >= 150:
+            image_dpi = raw_dpi
             logger.info(f"  ✓ Extracted DPI from image metadata: {image_dpi} DPI")
+        elif raw_dpi:
+            logger.info(f"  ⚠️  Ignoring low metadata DPI ({raw_dpi}) - likely JFIF default, using {image_dpi} DPI")
+        else:
+            logger.info(f"  ℹ️  No valid DPI in image metadata, using default: {image_dpi} DPI")
     else:
         logger.info(f"  ℹ️  No DPI in image metadata, using default: {image_dpi} DPI")
     
