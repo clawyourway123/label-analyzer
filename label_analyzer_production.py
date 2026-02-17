@@ -1057,7 +1057,7 @@ class GeminiClient:
     
     def analyze_image(self, image_data: Dict, prompt: str, response_schema: Optional[Dict] = None, 
                       original_width: Optional[int] = None, original_height: Optional[int] = None,
-                      temperature: float = 0.7) -> str:
+                      temperature: float = 0.7, media_resolution: Optional[str] = None) -> str:
         """Call Gemini with image and optional structured output.
 
         Results are cached by (image_data, prompt, schema) so repeated
@@ -1098,6 +1098,13 @@ class GeminiClient:
         
         # Set temperature for deterministic results (lower = more precise)
         config["temperature"] = temperature
+        
+        # Gemini 3: Set media_resolution for vision processing fidelity
+        # HIGH = maximum detail for fine text/OCR (more tokens, better accuracy)
+        # MEDIUM = balanced (default)
+        # LOW = fast, lower fidelity
+        if media_resolution:
+            config["media_resolution"] = media_resolution
 
         # Log image size and prompt length
         inline = image_data.get("inline_data", {})
@@ -1563,20 +1570,21 @@ If no measurement line is found, set measurement_line to null.
                 }
             }
             
-            # CRITICAL FIX: Pass ORIGINAL image dimensions (not cropped) for scale factor calculation
-            # This ensures scale_factor is calculated consistently with the DPI calibration.
-            # Cropped image inherits same pixel density as original, so we need original dims
-            # to properly track if Gemini resized the image.
-            orig_w, orig_h = self._image_size
+            # Pass CROPPED image dimensions for scale factor calculation.
+            # The cropped image is what Gemini actually receives, so scale factor
+            # must be based on the crop dimensions (not the full original image).
+            crop_w, crop_h = cropped_image.width, cropped_image.height
             
             # Use configured Gemini model for font measurement (Stage 3 is most critical for accuracy)
+            # media_resolution="high" gives Gemini maximum fidelity for fine text measurement
             response_text = self.gemini.analyze_image(
                 cropped_data,
                 validation_prompt,
                 CLP_VALIDATION_SCHEMA,
-                original_width=orig_w,
-                original_height=orig_h,
-                temperature=0.2  # Very low temperature for deterministic precision
+                original_width=crop_w,
+                original_height=crop_h,
+                temperature=0.2,  # Very low temperature for deterministic precision
+                media_resolution="high"  # Maximum fidelity for font pixel measurement
             )
             
             measurements = json.loads(response_text)
@@ -1601,20 +1609,16 @@ If no measurement line is found, set measurement_line to null.
                     return 1.0  # Don't correct uncertain measurements
             
             # Safely extract measurements with numeric coercion
+            # NOTE: Correction factor is applied AFTER scale factor (below),
+            # so we extract raw values first and correct at the end.
             try:
                 font_mm_raw = float(measurements.get('font_size_mm') or 0)
                 meas_conf_raw = float(measurements.get('measurement_confidence') or 0)
-                
-                # Apply dynamic correction based on confidence
-                correction = get_correction_factor(meas_conf_raw)
-                font_mm = font_mm_raw * correction
-                
-                if correction != 1.0:
-                    logger.info(f"  🔧 Applied x-height correction ({correction:.2f}x): {font_mm_raw:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
-                else:
-                    logger.info(f"  ✓ X-height measured (no correction): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
+                font_mm = font_mm_raw  # Will be corrected after scale factor
             except (ValueError, TypeError):
                 font_mm = 0
+                font_mm_raw = 0
+                meas_conf_raw = 0
             
             try:
                 font_px = float(measurements.get('font_size_pixels') or 0)
@@ -1662,6 +1666,17 @@ If no measurement line is found, set measurement_line to null.
                 measurements['line_distance_pixels_original'] = line_dist_px
                 measurements['line_distance_pixels_scaled'] = line_dist_px_original
                 measurements['scale_factor_applied'] = scale_factor
+            
+            # ⭐ Apply x-height correction LAST (after scale factor recalculation)
+            # This ensures correction is applied to the final mm value, not overwritten.
+            correction = get_correction_factor(meas_conf_raw)
+            font_mm_before_correction = font_mm
+            font_mm = font_mm * correction
+            
+            if correction != 1.0:
+                logger.info(f"  🔧 Applied x-height correction ({correction:.2f}x): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
+            else:
+                logger.info(f"  ✓ X-height measured (no correction needed): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # Get actual cropped image dimensions for logging
             cropped_w, cropped_h = cropped_image.width, cropped_image.height
