@@ -1558,11 +1558,19 @@ class LabelAnalyzer:
                 logger.info(f"  📐 Using all chars (no clear body text cluster)")
             
             # ================================================================
-            # LINE SPACING: Use most common tight spacing between body text lines
+            # LINE SPACING (CLP): Visible gap between lines
             # ================================================================
+            # CLP Regulation 2024/2865: "The distance between two lines" = the visible
+            # whitespace between the bottom of text in one line and top of text in the next.
+            # This is NOT leading (baseline-to-baseline) but the inter-line GAP.
+            # 
+            # Calculated as: center_to_center_spacing - font_size
+            # This gives the visible gap between text body of consecutive lines.
+            
             body_text_line_ys = sorted([line_y_centers_mm[i] for i in body_line_indices])
             
             line_distance_mm = 0.0
+            center_to_center_mm = 0.0
             if len(body_text_line_ys) >= 2:
                 spacings = [body_text_line_ys[i+1] - body_text_line_ys[i] 
                            for i in range(len(body_text_line_ys) - 1)]
@@ -1571,13 +1579,19 @@ class LabelAnalyzer:
                 most_common_spacing = spacing_bins.most_common(1)[0][0]
                 # Average all spacings near the mode (±0.3mm)
                 tight_spacings = [s for s in spacings if abs(s - most_common_spacing) <= 0.3]
-                line_distance_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
-                logger.info(f"  📐 Body text line spacings: {[round(s,2) for s in spacings]}")
-                logger.info(f"  📐 Most common spacing: {most_common_spacing:.1f}mm ({len(tight_spacings)} instances)")
+                center_to_center_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
+                
+                # CLP line gap = center-to-center - font height
+                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
+                
+                logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
+                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} = {line_distance_mm:.3f}mm")
+                logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
                            for i in range(len(line_y_centers_mm) - 1)]
-                line_distance_mm = statistics.median(spacings)
+                center_to_center_mm = statistics.median(spacings)
+                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
             
             # Height distribution for logging
             height_dist = Counter(round(h, 2) for h in all_char_heights_mm)
