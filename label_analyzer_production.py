@@ -1596,7 +1596,14 @@ If no measurement line is found, set measurement_line to null.
             measurements['font_size_mm'] = font_mm
             measurements['line_distance_mm'] = line_dist_mm
             
+            # DEBUG: Log all conversion values for troubleshooting 10% error
             logger.info(f"  ✓ Gemini measurements (scale-corrected):")
+            logger.info(f"    [DEBUG] DPI calibration: true_dpi={self.calibration.true_dpi}, dpmm={self.calibration.dpmm:.4f}, is_calibrated={self.calibration.is_calibrated}")
+            logger.info(f"    [DEBUG] Scale factor: cropped_scale_factor={cropped_scale_factor:.4f}, GEMINI_MAX_DIMENSION={self.gemini.GEMINI_MAX_DIMENSION}")
+            logger.info(f"    [DEBUG] Cropped image size passed to Gemini: {cropped_w}×{cropped_h}px")
+            logger.info(f"    [DEBUG] Font pixels: {font_px_gemini:.1f}px (Gemini) → {font_px:.1f}px (scaled) = {font_mm:.4f}mm")
+            logger.info(f"    [DEBUG] Line pixels: {line_dist_px_gemini:.1f}px (Gemini) → {line_dist_px:.1f}px (scaled) = {line_dist_mm:.4f}mm")
+            
             if cropped_scale_factor != 1.0:
                 logger.info(f"    Scale factor applied: {cropped_scale_factor:.4f} (Gemini resized the cropped image)")
                 logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px scaled, {font_px_gemini:.0f} px in Gemini space)")
