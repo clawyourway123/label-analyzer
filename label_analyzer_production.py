@@ -1724,21 +1724,22 @@ If no measurement line is found, set measurement_line to null.
             def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
                 """Dynamic correction based on measurement method and confidence.
                 
-                CALIBRATED LOGIC (empirically tuned for label analyzer):
-                - If cap-height-estimated: apply 0.763x to convert cap-height to x-height
-                  (0.71 was too high; real-world data shows 0.763 needed)
-                - If x-height-direct + high confidence (>=0.85): no correction (1.0x)
-                - If x-height-direct + medium confidence (0.7-0.85): gentle correction (0.98x)
-                - If x-height-direct + low confidence (<0.7): no correction (1.0x)
+                CRITICAL FIX: EU CLP regulations require VISIBLE DISPLAYED FONT SIZE (cap-height),
+                not x-height. Gemini measures x-height, so we must convert:
+                - X-height is ~67% of visible cap-height (typical font: 1.0mm x-height = 1.49mm cap-height)
+                - Empirically calibrated from real labels: 1.483 multiplier needed
+                
+                Logic:
+                - If x-height-direct: apply 1.483x to convert x-height to visible cap-height
+                - If cap-height-estimated: apply 1.0x (already cap-height from Gemini)
+                - Confidence just affects precision, not the direction of conversion
                 """
-                if 'cap-height' in method.lower():
-                    return 0.763  # Empirically calibrated: cap-height to x-height conversion
-                elif confidence >= 0.85:
-                    return 1.0   # Confident direct x-height, no correction needed
-                elif confidence >= 0.70:
-                    return 0.98  # Gentle correction for borderline cases
+                if 'x-height-direct' in method.lower():
+                    return 1.483  # Convert x-height to visible cap-height (empirically calibrated)
+                elif 'cap-height' in method.lower():
+                    return 1.0   # Already cap-height, no conversion needed
                 else:
-                    return 1.0   # Don't correct uncertain measurements
+                    return 1.0   # Default: no correction
             
             # Safely extract measurements with numeric coercion
             # NOTE: Correction factor is applied AFTER scale factor (below),
