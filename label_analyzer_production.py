@@ -1557,35 +1557,53 @@ If no measurement line is found, set measurement_line to null.
             
             measurements = json.loads(response_text)
             
-            # Safely extract measurements with numeric coercion
+            # ============================================================
+            # CRITICAL FIX: Apply scale factor to pixel measurements
+            # ============================================================
+            # Gemini may have internally resized the cropped image if it exceeds 1440px
+            # Measurements are in Gemini's resized space, not the original image space
+            # We must scale them back to original space before converting to mm
+            
+            cropped_scale_factor = self.gemini._last_image_scale_factor
+            
+            # Extract pixel measurements from Gemini (in resized space)
             try:
-                font_mm = float(measurements.get('font_size_mm') or 0)
+                font_px_gemini = float(measurements.get('font_size_pixels') or 0)
             except (ValueError, TypeError):
-                font_mm = 0
+                font_px_gemini = 0
             
             try:
-                font_px = float(measurements.get('font_size_pixels') or 0)
+                line_dist_px_gemini = float(measurements.get('line_distance_pixels') or 0)
             except (ValueError, TypeError):
-                font_px = 0
-                
-            try:
-                line_dist_mm = float(measurements.get('line_distance_mm') or 0)
-            except (ValueError, TypeError):
-                line_dist_mm = 0
-                
-            try:
-                line_dist_px = float(measurements.get('line_distance_pixels') or 0)
-            except (ValueError, TypeError):
-                line_dist_px = 0
-                
+                line_dist_px_gemini = 0
+            
             try:
                 meas_conf = float(measurements.get('measurement_confidence') or 0)
             except (ValueError, TypeError):
                 meas_conf = 0
             
-            logger.info(f"  ✓ Gemini measurements:")
-            logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px)")
-            logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px)")
+            # Scale pixel measurements back to original image space
+            # (Same scaling logic as used for bounding box coordinates)
+            font_px = font_px_gemini * cropped_scale_factor
+            line_dist_px = line_dist_px_gemini * cropped_scale_factor
+            
+            # Convert to mm using calibrated DPMM from original image
+            # Cropped image inherits same pixel density as original, so same DPMM applies
+            font_mm = font_px / self.calibration.dpmm if self.calibration.dpmm > 0 else 0
+            line_dist_mm = line_dist_px / self.calibration.dpmm if self.calibration.dpmm > 0 else 0
+            
+            # Override Gemini's mm calculations with our corrected ones
+            measurements['font_size_mm'] = font_mm
+            measurements['line_distance_mm'] = line_dist_mm
+            
+            logger.info(f"  ✓ Gemini measurements (scale-corrected):")
+            if cropped_scale_factor != 1.0:
+                logger.info(f"    Scale factor applied: {cropped_scale_factor:.4f} (Gemini resized the cropped image)")
+                logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px scaled, {font_px_gemini:.0f} px in Gemini space)")
+                logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px scaled, {line_dist_px_gemini:.0f} px in Gemini space)")
+            else:
+                logger.info(f"    Font: {font_mm:.2f} mm ({font_px:.0f} px)")
+                logger.info(f"    Line distance: {line_dist_mm:.2f} mm ({line_dist_px:.0f} px)")
             logger.info(f"    Background: {measurements.get('background_color', 'unknown')} text")
             logger.info(f"    Contrast: {measurements.get('contrast_assessment', 'unknown')}")
             logger.info(f"    Confidence: {meas_conf:.0%}")
