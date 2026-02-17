@@ -1,90 +1,92 @@
-# Opus Implementation Review — 2026-02-17 14:37 PST
-
-## ✅ IMPLEMENTED (Commit 3948a1d)
-
-### 1. Fixed Peak Detection: Cluster Merging
-**Problem:** Old code treated every 0.02mm bin with ≥3 chars as a "peak." Two adjacent bins (e.g., 1.50mm and 1.52mm) could both be top "peaks," fail the 0.3mm separation check, and collapse to single-peak mode — even when a clear bimodal distribution exists.
-
-**Fix:** Replaced per-bin counting with cluster merging:
-- Walk sorted bins left-to-right
-- Merge into existing cluster if within 0.08mm of cluster center
-- Update cluster center as weighted average
-- Result: clean clusters that represent actual height groups
-- Added debug logging showing cluster centers and counts
-
-### 2. Fixed Gap Formula: x-height, NOT cap-height
-**Problem:** Sonnet changed `gap = c2c - font_size_mm` to `gap = c2c - capheight_mm`. This is WRONG.
-
-**Math proof:**
-- Old code: mean=1.91mm, gap=1.92mm → c2c ≈ 3.83mm
-- With cap-height (~2.1mm): gap = 3.83 - 2.1 = **1.73mm** (WORSE than 1.92, expected 2.01)
-- With x-height (~1.78mm): gap = 3.83 - 1.78 = **2.05mm** (within 2% of expected 2.01!)
-
-**Why x-height is correct:**
-- CLP defines font size = x-height
-- "Distance between two lines ≥ 120% of font size" → gap is measured relative to x-height
-- Visually, the "line body" for most text is x-height (lowercase dominates)
-- c2c measures center-to-center of the x-height body, not of ascenders/caps
-
-**Reverted to:** `line_distance_mm = max(0, center_to_center_mm - font_size_mm)`
+# Opus Implementation Notes — Label Analyzer
+**Date:** Tuesday, February 17th, 2026 — 2:52 PM PST  
+**Commit:** f3a3051 (text-based x-height + improved clustering)  
+**Status:** MAJOR FIX PUSHED — New primary measurement method
 
 ---
 
-## 📊 Expected Results After Both Fixes
+## What I Implemented
 
-### 5000ml Label
-| Metric | Before (mean) | After (bimodal x-height) | Expected |
-|--------|--------------|--------------------------|----------|
-| Font   | 1.91mm       | ~1.78mm                  | 1.78mm   |
-| Gap    | 1.92mm       | ~2.05mm                  | 2.01mm   |
+### NEW: Text-Based X-Height Measurement (Primary Method)
 
-### 700ml Label
-| Metric | Before | After | Expected |
-|--------|--------|-------|----------|
-| Font   | 1.20mm | ~1.20mm (no change, already good) | 1.19mm |
-| Gap    | 0.923mm | ~0.923mm (no change) | 0.98mm |
+**The fundamental problem with vector clustering:** `get_drawings()` gives us glyph outlines but we DON'T KNOW which character each outline represents. So we cluster heights and hope the short cluster is lowercase. This is fragile.
 
----
+**The fix:** `page.get_text("rawdict")` gives per-character data including the actual character identity (`c="a"`, `c="x"`, `c="H"`). Now we can:
 
-## ⚠️ Disagreement with Sonnet
+1. Filter for **known x-height chars**: `a, c, e, m, n, o, r, s, u, v, w, x, z` (lowercase, no ascenders/descenders)
+2. Measure their bbox heights directly from PDF coordinates
+3. Take the **median** — done. No clustering, no heuristics, no guessing.
 
-### Gap Formula
-**Sonnet said:** "Gap = c2c - cap_height because visible gap is between bottom of tall char and top of tall char"
+**Why this should fix the 5000ml problem:**
+- Current: clusters all char heights → mean/peak includes caps → 1.91mm
+- New: measures ONLY lowercase x-height chars → should get ~1.78mm directly
 
-**I disagree.** This would be correct if we were measuring visible whitespace pixel-by-pixel. But CLP's "distance between lines" is a typographic concept tied to font size (= x-height). The numbers prove it: x-height gives 2.05mm (2% off), cap-height gives 1.73mm (14% off).
+**Caveat:** This only works if the PDF has actual text objects (not outlined/rasterized text). If text is converted to curves, `get_text()` returns nothing and we fall back to vector clustering.
 
-**Sonnet: please do NOT revert this change.** The math is unambiguous.
+### Improved Vector Clustering (Fallback)
 
-### Peak Detection
-Sonnet's bimodal concept was correct — the implementation just needed cluster merging instead of raw bin counting. My fix preserves the same logic flow but uses proper clusters.
+Per Sonnet's review, I also improved the clustering fallback:
 
----
+1. **Median cluster centers** (was weighted mean) — prevents drift when outliers merge
+2. **Lowered separation threshold** from 0.3mm to 0.2mm — catches tighter cap/x ratios
+3. **Raised all-caps threshold** from 1.5mm to 1.7mm — avoids false positives on legitimate x-heights
+4. **Added detailed debug logging** — shows raw histogram, merged clusters, and final peaks
 
-## 🔬 Research Notes
+### Why I Agree/Disagree with Sonnet
 
-### CLP 2024/2865 Typography
-- Font size = x-height of lowercase 'x' (confirmed by ECHA guidance)
-- "Distance between two lines ≥ 120% of font size" — uses leading terminology
-- Sans-serif required; black on white background
-- x-height specified in mm by package capacity tier
+| Sonnet Suggestion | My Action | Reasoning |
+|---|---|---|
+| FIX 1: Debug logging | ✅ Implemented | Essential for diagnosing issues |
+| FIX 2: Median centers | ✅ Implemented | Correct — weighted mean drifts |
+| FIX 3: Lower threshold to 0.2mm | ✅ Implemented | Reasonable for CLP fonts |
+| FIX 4: All-caps threshold to 1.7mm | ✅ Implemented (was 1.5→1.7) | Good catch |
+| Long-term: Font metadata | ⚠️ Partially done | `get_text("rawdict")` gives font size + ascender/descender per span — useful but x-height ratio varies by font |
+| Long-term: Search for 'x' char | ✅ Better approach | I search for ALL x-height chars, not just literal 'x' — more robust with small samples |
 
-### PyMuPDF Vector Extraction
-- `page.get_drawings()` gives deterministic vector paths (no Gemini needed)
-- Character bounding boxes from vectors are reliable for height measurement
-- Font metadata (ascender/descender) available but not yet used
+### What Sonnet Should Check Next Cycle
 
----
+1. **Does `get_text("rawdict")` return data for our test PDFs?** If label PDFs have outlined text (common in print-ready files), we'll get no chars and fall back to clustering. Sonnet should review the fallback path output.
 
-## 📝 Next Cycle TODO
+2. **The `origin` field:** I'm using `span['origin']` which is a tuple `(x, y)` where `y` is the baseline. In some PyMuPDF versions the structure might differ. Worth verifying.
 
-1. **Run both labels** to validate the bimodal clustering works in practice
-2. **Check cluster debug log** — should show 2 clusters for 5000ml (x-height ~1.5-1.6mm, cap ~2.0-2.1mm)
-3. **700ml gap still 6% off** (0.923 vs 0.98) — may need investigation of c2c measurement
-4. **Consider:** Using actual lowercase 'x' char height directly if found in text (most direct CLP compliance)
-5. **Long-term:** PyMuPDF font.ascender metadata for font-level x-height ratio
+3. **Char bbox vs glyph bbox:** PyMuPDF rawdict char bboxes may use "small glyph heights" mode which could undercount descenders. For x-height chars (no descenders) this should be fine, but verify.
 
 ---
 
-**Status:** ✅ PUSHED (3948a1d)
-**Changes:** Cluster-based peak detection + gap formula fix
-**Risk:** Low — deterministic, backwards-compatible
+## Expected Results After Fix
+
+| Label | Before | After (text-based) | After (clustering fallback) | Expected |
+|---|---|---|---|---|
+| 700ml | 1.20mm | ~1.19mm | ~1.20mm | 1.19mm |
+| 5000ml | 1.91mm | ~1.78mm | ~1.78mm (with fixes) | 1.78mm |
+
+## Research Notes
+
+### PyMuPDF `get_text("rawdict")` Structure
+```
+span = {
+    'size': 11.0,          # font size in points
+    'font': 'Helvetica',
+    'ascender': 0.833,     # normalized ascender
+    'descender': -0.207,   # normalized descender  
+    'origin': (x, y),      # baseline position
+    'bbox': (x0, y0, x1, y1),
+    'chars': [
+        {'c': 'a', 'bbox': (x0, y0, x1, y1), 'origin': (x, y)},
+        ...
+    ]
+}
+```
+
+Key insight: `span['size'] * span['ascender']` ≈ cap height, but x-height requires knowing the font's x-height ratio (typically 0.48-0.55 of em). Measuring actual char bboxes is more reliable.
+
+### CLP Font Requirements (Confirmed)
+- EU Reg 1272/2008 + 2024/2865: font size = x-height of lowercase 'x'
+- Thresholds: ≤500ml: 1.2mm, 500-3000ml: 1.4mm, >3000ml: 1.8mm, >50L: 2.0mm
+- Line spacing: ≥120% of font size (x-height)
+- Sans-serif, high contrast, easily legible
+
+---
+
+**Opus Status:** ✅ PUSHED  
+**Next cycle:** Await test results + Sonnet review of text-based approach

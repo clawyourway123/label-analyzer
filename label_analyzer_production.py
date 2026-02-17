@@ -1777,42 +1777,95 @@ If no clear number is visible, return 0."""
                 XHEIGHT_CHARS = set('acemnorsuvwxz')
                 CAP_CHARS = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 
-                xheight_pts = []
-                cap_pts = []
+                # STEP 1: Collect all spans in region, grouped by font size
+                # This prevents header/title text from contaminating body text measurements
+                spans_by_size = {}  # rounded pt size → list of spans
                 
                 for block in rawdict.get('blocks', []):
-                    if block.get('type') != 0:  # text blocks only
+                    if block.get('type') != 0:
                         continue
                     for line in block.get('lines', []):
                         for span in line.get('spans', []):
-                            origin_y = span.get('origin', (0, 0))[1] if isinstance(span.get('origin'), (list, tuple)) else 0
-                            # Check if span is in our region
                             sbbox = span.get('bbox', (0, 0, 0, 0))
                             if (sbbox[0] >= pt_xmin - 2 and sbbox[2] <= pt_xmax + 2 and
                                 sbbox[1] >= pt_ymin - 2 and sbbox[3] <= pt_ymax + 2):
-                                # Process individual chars if available
-                                for ch_info in span.get('chars', []):
-                                    c = ch_info.get('c', '')
-                                    cb = ch_info.get('bbox', (0, 0, 0, 0))
-                                    ch_height_pt = cb[3] - cb[1]
-                                    if ch_height_pt > 0.3 and ch_height_pt < 20:
-                                        if c in XHEIGHT_CHARS:
-                                            xheight_pts.append(ch_height_pt)
-                                        elif c in CAP_CHARS:
-                                            cap_pts.append(ch_height_pt)
+                                sz = round(span.get('size', 0), 1)
+                                if sz > 0:
+                                    spans_by_size.setdefault(sz, []).append(span)
+                
+                # STEP 2: Find the dominant (most common) font size = body text
+                # Count chars per font size to find body text size
+                size_char_counts = {}
+                for sz, spans in spans_by_size.items():
+                    total_chars = sum(len(sp.get('chars', [])) for sp in spans)
+                    size_char_counts[sz] = total_chars
+                
+                if size_char_counts:
+                    body_font_size = max(size_char_counts, key=size_char_counts.get)
+                    logger.info(f"  📐 Font sizes in region: {dict(sorted(size_char_counts.items()))}")
+                    logger.info(f"  📐 Body text font size: {body_font_size}pt ({size_char_counts[body_font_size]} chars)")
+                    
+                    # Only measure chars from body text font size (±0.5pt tolerance)
+                    body_spans = []
+                    for sz, spans in spans_by_size.items():
+                        if abs(sz - body_font_size) <= 0.5:
+                            body_spans.extend(spans)
+                else:
+                    body_spans = []
+                
+                # STEP 3: Measure x-height using origin (baseline) for precision
+                # For x-height chars: measure from bbox TOP to BASELINE (origin_y)
+                # This avoids below-baseline bbox padding that inflates full bbox height.
+                # For cap chars: use full bbox height (caps sit on baseline, no descenders)
+                xheight_pts = []
+                xheight_bbox_pts = []  # full bbox for comparison/debugging
+                cap_pts = []
+                
+                for span in body_spans:
+                    origin = span.get('origin')
+                    if isinstance(origin, (list, tuple)) and len(origin) >= 2:
+                        baseline_y = origin[1]
+                    else:
+                        baseline_y = None
+                    
+                    for ch_info in span.get('chars', []):
+                        c = ch_info.get('c', '')
+                        cb = ch_info.get('bbox', (0, 0, 0, 0))
+                        ch_height_pt = cb[3] - cb[1]  # full bbox height
+                        
+                        if ch_height_pt > 0.3 and ch_height_pt < 20:
+                            if c in XHEIGHT_CHARS:
+                                if baseline_y is not None and baseline_y > cb[1]:
+                                    # PRECISE: measure from top of glyph to baseline
+                                    # x-height chars don't extend below baseline,
+                                    # so this gives true x-height without bbox padding
+                                    xh = baseline_y - cb[1]
+                                    if xh > 0.3:
+                                        xheight_pts.append(xh)
+                                        xheight_bbox_pts.append(ch_height_pt)
+                                else:
+                                    # Fallback: use full bbox (less precise)
+                                    xheight_pts.append(ch_height_pt)
+                                    xheight_bbox_pts.append(ch_height_pt)
+                            elif c in CAP_CHARS:
+                                cap_pts.append(ch_height_pt)
                 
                 doc2.close()
                 
                 if len(xheight_pts) >= 5:
-                    # Use median of x-height chars for robustness
                     text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
+                    bbox_xheight_mm = statistics.median(xheight_bbox_pts) / 72 * 25.4
                     logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars)")
+                    if abs(text_xheight_mm - bbox_xheight_mm) > 0.01:
+                        logger.info(f"  📐 TEXT-BASED bbox x-height would be: {bbox_xheight_mm:.3f}mm (origin-based saved {bbox_xheight_mm - text_xheight_mm:.3f}mm)")
                     if len(cap_pts) >= 3:
                         text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
                         logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
                         logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
                 else:
-                    logger.info(f"  📐 Text extraction found only {len(xheight_pts)} x-height chars — falling back to vector clustering")
+                    logger.info(f"  📐 Text extraction found only {len(xheight_pts)} x-height chars (need ≥5) — falling back to vector clustering")
+                    if size_char_counts:
+                        logger.info(f"  📐 Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase")
             except Exception as e:
                 logger.debug(f"  📐 Text-based measurement failed: {e}")
             
@@ -1822,6 +1875,13 @@ If no clear number is visible, return 0."""
             # CLP requires X-HEIGHT (lowercase letters), not mean of all chars.
             # Mixed-case text has two clusters: short (x-height) and tall (caps/ascenders).
             # We use histogram peak detection to find both, then use x-height for compliance.
+            
+            # Filter out unreasonably small paths (subscripts, chemical formulas, dots)
+            MIN_BODY_TEXT_HEIGHT = 0.5  # mm — anything smaller is not body text
+            filtered_body_heights = [h for h in body_char_heights if h >= MIN_BODY_TEXT_HEIGHT]
+            if len(filtered_body_heights) >= 10:
+                body_char_heights = filtered_body_heights
+                logger.info(f"  📐 Filtered to {len(body_char_heights)} chars ≥{MIN_BODY_TEXT_HEIGHT}mm (removed {len(filtered_body_heights)} tiny glyphs)")
             
             # Build histogram of body char heights (0.02mm bins)
             height_bins = Counter(round(h, 2) for h in body_char_heights)
