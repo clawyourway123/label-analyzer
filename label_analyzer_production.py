@@ -1421,7 +1421,9 @@ If no measurement line is found, set measurement_line to null.
             
             if response.get("measurement_line"):
                 line_data = response["measurement_line"]
-                logger.info(f"  🎯 Found measurement line (pre-scale): {line_data}")
+                px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
+                              (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
+                logger.info(f"  🎯 Found measurement line (pre-scale): start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px, value={line_data['value_mm']}mm")
                 
                 # CRITICAL: Scale coordinates back to original image space
                 # Gemini returns coordinates in its internally-resized space
@@ -1432,7 +1434,9 @@ If no measurement line is found, set measurement_line to null.
                     line_data["start_point"]["y"] = int(round(line_data["start_point"]["y"] * scale_factor))
                     line_data["end_point"]["x"] = int(round(line_data["end_point"]["x"] * scale_factor))
                     line_data["end_point"]["y"] = int(round(line_data["end_point"]["y"] * scale_factor))
-                    logger.info(f"  ✓ Scaled measurement line: {line_data}")
+                    px_distance_scaled = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
+                                         (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
+                    logger.info(f"  ✓ Scaled measurement line: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance_scaled:.1f}px, value={line_data['value_mm']}mm")
                 
                 line = MeasurementLine(
                     start_point=Point(**line_data["start_point"]),
