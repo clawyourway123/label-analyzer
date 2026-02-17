@@ -531,23 +531,33 @@ The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm).
 EU Regulation 1272/2008 (CLP) CLP compliance requires measuring x-height (the height of lowercase 'x').
 This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') or descenders (like 'g', 'p', 'y').
 
-**COMMON MISTAKE:** Measuring capital letter height (e.g., 'H') is ~25-30% LARGER than x-height.
-You MUST measure lowercase letter body height (e.g., the height of 'a', 'e', 'o', 'x') for accuracy.
+**CRITICAL RULE:** You MUST measure x-height directly from lowercase letters. Do NOT estimate or convert.
+- Capital letter height is ~25-30% LARGER than x-height (e.g., 'H' is too tall)
+- Even if text is all capitals, find a mixed-case section or identify the X-HEIGHT from descender analysis
+- If you must approximate from all-caps text, be explicit: "Estimated x-height from [letter]: [value]px"
 
 ### **Task: Measure these metrics (provide numbers, not judgments):**
 
-1. **Font size (X-HEIGHT - CRITICAL):** Find the smallest readable text in the CLP section. 
-   - **STEP 1:** Identify a lowercase letter word (e.g., "natural", "certified", "contains")
-     * **EDGE CASE - ALL CAPS:** If text is all capitals (e.g., "WARNING", "DANGER"), measure cap-height (baseline to top of 'H' or 'A') and multiply by 0.71 to approximate x-height. Note: "Measured cap-height [X]px × 0.71 = [Y]px x-height equivalent"
-   - **STEP 2:** Locate the x-height line: 
-     * For letters like 'a', 'e', 'x', 'c': measure from baseline to the TOP of the letter body (not the ascender)
-     * EXCLUDE the tallest part if it's an ascender (d, h, k, l, t) or descender (g, j, p, q, y)
-   - **STEP 3:** Measure ONLY the middle portion of lowercase letters (the x-height)
-     * Example: In the word "text", measure the height of the 'e' or 'x', NOT the 't'
-   - **STEP 4:** Report measurement
+1. **Font size (X-HEIGHT - CRITICAL):** Find the SMALLEST readable text in the CLP section. 
+   - **PREFERRED METHOD:** Identify any lowercase letter word (e.g., "natural", "certified", "contains", "hazard", "precaution")
+     * Measure from baseline (bottom of letter) to TOP of x-body (top of 'a', 'e', 'o', 'x', 'n', etc.)
+     * **MUST EXCLUDE:** Ascenders (d, h, k, l, t) and descenders (g, j, p, q, y) - these are taller/shorter
+     * Example: In "text", measure the 'e' or 'x' (NOT the 't')
+     * Report: "X-height measured from letter '[letter]' in word '[word]': [X]px = [Y]mm"
+   
+   - **IF ONLY ALL-CAPS TEXT EXISTS:**
+     * Look for letters like 'O' or 'I' that DON'T have descenders to identify baseline
+     * Measure the VISIBLE HEIGHT of the capital (not including any space above/below)
+     * **IMPORTANT:** Do NOT apply 0.71 conversion—this causes 20%+ errors
+     * Instead, report: "All-caps text: measured cap-height [X]px from [letter]"
+     * Then analyze the actual font design to estimate true x-height (usually 60-75% of cap-height for CLP fonts)
+     * Report final x-height estimate with lowered confidence if estimated
+   
+   - **STEP 4:** Report measurement with confirmation
      * Height in pixels: X
      * Converted to mm: X / {dpmm:.2f} = Y mm
-     * Confirm: "X-height measured from letter '[letter]' in word '[word]': Y mm"
+     * Measurement method: "x-height-direct" (preferred) or "estimated-from-caps" (if necessary)
+     * Confidence level: 0.9-1.0 if direct measurement, 0.6-0.8 if estimated
 
 2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
    - **MUST** measure from baseline of one line to baseline of next line (NOT top-to-top or bottom-to-bottom)
@@ -668,18 +678,29 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
         line_status = "PASS" if line_pass else "FAIL"
         line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
     
-    # Rule 3: Background & Text Color (STRICT: White background with Black text ONLY)
-    # EU Regulation 1272/2008 (CLP): CLP text MUST be white background with black letters
+    # Rule 3: Background & Text Color (High Contrast Required)
+    # EU Regulation 1272/2008 (CLP): CLP text MUST have high contrast
+    # - Primary: White background with Black text (classic CLP)
+    # - Secondary: Yellow background with Black text (valid for hazard pictograms, GHS color-coded)
+    # - Requirement: Must be high contrast (visual assessment)
     bg_color = metrics.get('background_color', '').lower()
     text_color = metrics.get('text_color', '').lower()
+    contrast_assess = metrics.get('contrast_assessment', 'medium').lower()
     
-    # Check for white background with black text
-    is_white_bg = any(word in bg_color for word in ['white', 'off-white', 'ivory'])
-    is_black_text = any(word in text_color for word in ['black', 'dark', 'dark gray', 'grey'])
+    # Valid combinations for CLP compliance
+    is_white_bg = any(word in bg_color for word in ['white', 'off-white', 'ivory', 'cream', 'light'])
+    is_yellow_bg = any(word in bg_color for word in ['yellow', 'gold', 'amber', 'orange-yellow', 'mustard'])
+    is_black_text = any(word in text_color for word in ['black', 'dark', 'dark gray', 'dark grey', 'charcoal'])
+    is_high_contrast = contrast_assess in ['high', 'very high', 'excellent']
     
-    contrast_pass = is_white_bg and is_black_text
+    # Accept: (White + Black) OR (Yellow + Black with high contrast)
+    contrast_pass = (is_white_bg and is_black_text) or (is_yellow_bg and is_black_text and is_high_contrast)
     contrast_status = "PASS" if contrast_pass else "FAIL"
-    contrast_detail = f"Requirement: White background + Black text. Found: {metrics.get('background_color', 'unknown')} bg, {metrics.get('text_color', 'unknown')} text"
+    
+    if contrast_pass:
+        contrast_detail = f"High contrast confirmed: {metrics.get('background_color', 'unknown')} bg + {metrics.get('text_color', 'unknown')} text"
+    else:
+        contrast_detail = f"Insufficient contrast: {metrics.get('background_color', 'unknown')} bg + {metrics.get('text_color', 'unknown')} text (assessment: {contrast_assess})"
     
     overall_pass = font_pass and (line_pass if line_pass is not None else True) and contrast_pass
     
