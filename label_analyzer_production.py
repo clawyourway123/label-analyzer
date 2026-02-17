@@ -1721,25 +1721,25 @@ If no measurement line is found, set measurement_line to null.
             # But if confidence is borderline, apply gentle correction to reduce upward bias.
             # This is empirically calibrated: vision models tend to measure ~2-3% high.
             
-            def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
+            def get_correction_factor(confidence: float, method: str = 'x-height-direct', raw_mm: float = 0) -> float:
                 """Dynamic correction based on measurement method and confidence.
                 
-                CRITICAL FIX: EU CLP regulations require VISIBLE DISPLAYED FONT SIZE (cap-height),
-                not x-height. Gemini measures x-height, so we must convert:
-                - X-height is ~67% of visible cap-height (typical font: 1.0mm x-height = 1.49mm cap-height)
-                - Empirically calibrated from real labels: 1.483 multiplier needed
+                ADAPTIVE LOGIC: Gemini reports inconsistently (x-height vs cap-height).
+                Check the raw value to determine if correction is needed:
+                - If raw < 1.3mm: likely x-height, apply 1.483x correction
+                - If raw >= 1.3mm: likely already cap-height, no correction
                 
-                Logic:
-                - If x-height-direct: apply 1.483x to convert x-height to visible cap-height
-                - If cap-height-estimated: apply 1.0x (already cap-height from Gemini)
-                - Confidence just affects precision, not the direction of conversion
+                This avoids over-correcting when Gemini already measured cap-height.
                 """
-                if 'x-height-direct' in method.lower():
-                    return 1.483  # Convert x-height to visible cap-height (empirically calibrated)
-                elif 'cap-height' in method.lower():
-                    return 1.0   # Already cap-height, no conversion needed
+                if raw_mm > 0 and raw_mm >= 1.3:
+                    # Measurement already looks like cap-height, don't convert
+                    return 1.0
+                elif 'x-height-direct' in method.lower() and raw_mm > 0 and raw_mm < 1.3:
+                    # Low value likely means x-height, apply conversion
+                    return 1.483
                 else:
-                    return 1.0   # Default: no correction
+                    # Conservative: no conversion by default
+                    return 1.0
             
             # Safely extract measurements with numeric coercion
             # NOTE: Correction factor is applied AFTER scale factor (below),
@@ -1824,11 +1824,11 @@ If no measurement line is found, set measurement_line to null.
                 correction = 1.0  # Already corrected by Gemini
                 logger.info(f"  ✓ Using Gemini's estimated x-height: {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm")
             else:
-                # FALLBACK: Apply automatic correction based on method + confidence
-                correction = get_correction_factor(meas_conf_raw, measurement_method)
+                # FALLBACK: Apply automatic correction based on method + confidence + raw value
+                correction = get_correction_factor(meas_conf_raw, measurement_method, font_mm_before_correction)
                 font_mm = font_mm * correction
                 if correction != 1.0:
-                    logger.info(f"  🔧 Applied correction ({correction:.2f}x, method={measurement_method}): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
+                    logger.info(f"  🔧 Applied correction ({correction:.2f}x, method={measurement_method}, raw={font_mm_before_correction:.2f}mm): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # CRITICAL: Update measurements dict with corrected value for rule validation
             measurements['font_size_mm'] = font_mm
