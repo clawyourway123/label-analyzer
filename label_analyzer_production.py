@@ -2406,8 +2406,14 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
         # Store image dimensions for ensemble scoring
         self._image_size = (image.width, image.height)
 
-        # Stage 0a: Calibrate DPI
-        self.calibrate_dpi(image, image_data)
+        # Stage 0a: Calibrate DPI (skip for PDFs — vector measurement in Stage 3 is exact)
+        if hasattr(self, '_pdf_path') and self._pdf_path:
+            logger.info("Stage 0: Skipping DPI calibration (PDF vector measurement will be used in Stage 3)")
+            self.calibration.true_dpi = self.original_dpi
+            self.calibration.dpmm = self.original_dpi / 25.4
+            self.calibration.is_calibrated = True
+        else:
+            self.calibrate_dpi(image, image_data)
         
         # Stage 0b: Detect package size (if not provided)
         if self.package_size_ml == 500 and self.package_size_confidence == 0.0:
