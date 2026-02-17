@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Label Analyzer Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 2px solid #334155;
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 28px;
+            color: #60a5fa;
+            margin-bottom: 10px;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #1e293b;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #94a3b8;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #60a5fa, #3b82f6);
+        }
+        
+        .card h2 {
+            font-size: 18px;
+            color: #60a5fa;
+            margin-bottom: 15px;
+            padding-top: 5px;
+        }
+        
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #334155;
+            cursor: help;
+            position: relative;
+            transition: background 0.2s;
+        }
+        
+        .metric-row:hover {
+            background: #0f172a;
+        }
+        
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-label {
+            font-weight: 500;
+            color: #cbd5e1;
+        }
+        
+        .metric-value {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        .badge {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .badge.pass {
+            background: #10b981;
+            color: white;
+        }
+        
+        .badge.fail {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .badge.warn {
+            background: #f59e0b;
+            color: white;
+        }
+        
+        .badge.info {
+            background: #3b82f6;
+            color: white;
+        }
+        
+        .tooltip {
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            right: 0;
+            background: #0f172a;
+            border: 1px solid #60a5fa;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #cbd5e1;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            z-index: 10;
+            white-space: normal;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+        }
+        
+        .metric-row:hover .tooltip {
+            opacity: 1;
+        }
+        
+        .region-item {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 12px;
+            position: relative;
+        }
+        
+        .region-item.compliant {
+            border-left: 4px solid #10b981;
+        }
+        
+        .region-item.non-compliant {
+            border-left: 4px solid #ef4444;
+        }
+        
+        .region-name {
+            font-weight: 600;
+            color: #f1f5f9;
+            margin-bottom: 10px;
+        }
+        
+        .checks {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .check {
+            background: #1e293b;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            border-left: 3px solid #64748b;
+            transition: all 0.2s;
+            cursor: help;
+        }
+        
+        .check.pass {
+            border-left-color: #10b981;
+            color: #a7f3d0;
+        }
+        
+        .check.fail {
+            border-left-color: #ef4444;
+            color: #fca5a5;
+        }
+        
+        .check.warn {
+            border-left-color: #f59e0b;
+            color: #fcd34d;
+        }
+        
+        .check:hover {
+            background: #334155;
+        }
+        
+        .summary {
+            background: #1e293b;
+            border: 2px solid #334155;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        
+        .summary h3 {
+            color: #60a5fa;
+            margin-bottom: 15px;
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .summary-stat {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .summary-stat-label {
+            font-size: 12px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        
+        .summary-stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #60a5fa;
+        }
+        
+        .error-box {
+            background: #7f1d1d;
+            border: 1px solid #dc2626;
+            color: #fca5a5;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+            color: #94a3b8;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid #334155;
+            border-top-color: #60a5fa;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #334155;
+            color: #64748b;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📋 Label Analyzer Dashboard</h1>
+            <div class="status">Last updated: <span id="timestamp">--:--:--</span></div>
+        </header>
+        
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>Loading analyzer results...</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Sample data structure - replace with real API call
+        const sampleData = {
+            timestamp: new Date().toLocaleTimeString(),
+            calibration: {
+                dpi: 257,
+                is_calibrated: true,
+                dpmm: 10.14
+            },
+            package_size: {
+                value_ml: 500,
+                confidence: 0.95
+            },
+            regions: [
+                {
+                    label: "Ingredients List",
+                    classification: "CLP",
+                    confidence: 0.92,
+                    checks: {
+                        font_size: {
+                            measured_mm: 2.01,
+                            expected_mm: 2.0,
+                            error_pct: 0.5,
+                            status: "PASS",
+                            detail: "2.01mm >= 1.2mm threshold ✓"
+                        },
+                        line_distance: {
+                            measured_mm: 2.41,
+                            required_mm: 2.41,
+                            error_pct: 0,
+                            status: "PASS",
+                            detail: "2.41mm = 120% of font size ✓"
+                        },
+                        contrast: {
+                            measured: "white bg, black text",
+                            status: "PASS",
+                            detail: "Meets EU regulation requirement ✓"
+                        }
+                    },
+                    compliant: true,
+                    bounding_box: {
+                        x: 50,
+                        y: 120,
+                        width: 250,
+                        height: 180
+                    }
+                },
+                {
+                    label: "Hazard Symbols",
+                    classification: "CLP",
+                    confidence: 0.88,
+                    checks: {
+                        font_size: {
+                            measured_mm: 1.18,
+                            expected_mm: 1.2,
+                            error_pct: 1.67,
+                            status: "WARN",
+                            detail: "1.18mm slightly below 1.2mm (borderline)"
+                        },
+                        line_distance: {
+                            measured_mm: 1.42,
+                            required_mm: 1.42,
+                            error_pct: 0,
+                            status: "PASS",
+                            detail: "Meets 120% line spacing rule ✓"
+                        },
+                        contrast: {
+                            measured: "white bg, black text",
+                            status: "PASS",
+                            detail: "Good contrast ✓"
+                        }
+                    },
+                    compliant: false,
+                    needs_review: true,
+                    review_reason: "Font size borderline - recommend human verification"
+                },
+                {
+                    label: "Brand Name",
+                    classification: "NON-CLP",
+                    confidence: 0.95,
+                    checks: {
+                        font_size: {
+                            measured_mm: 3.5,
+                            expected_mm: null,
+                            error_pct: null,
+                            status: "INFO",
+                            detail: "Non-CLP region - no size requirement"
+                        }
+                    },
+                    compliant: true,
+                    bounding_box: {
+                        x: 100,
+                        y: 400,
+                        width: 300,
+                        height: 80
+                    }
+                }
+            ]
+        };
+        
+        function renderDashboard(data) {
+            const content = document.getElementById('content');
+            document.getElementById('timestamp').textContent = data.timestamp;
+            
+            let html = `
+                <div class="grid">
+                    <div class="card">
+                        <h2>📊 Calibration</h2>
+                        <div class="metric-row">
+                            <span class="metric-label">DPI</span>
+                            <div class="metric-value">
+                                <span class="value">${data.calibration.dpi}</span>
+                                <div class="tooltip">Actual DPI calibrated from measurement line on label</div>
+                            </div>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">px/mm</span>
+                            <div class="metric-value">
+                                <span class="value">${data.calibration.dpmm.toFixed(2)}</span>
+                                <div class="tooltip">Pixels per millimeter - used for all mm conversions</div>
+                            </div>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Status</span>
+                            <div class="metric-value">
+                                <span class="badge ${data.calibration.is_calibrated ? 'pass' : 'warn'}">
+                                    ${data.calibration.is_calibrated ? 'Calibrated' : 'Default'}
+                                </span>
+                                <div class="tooltip">${data.calibration.is_calibrated ? 'Measurement line detected and applied' : 'Using default DPI value'}</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h2>📦 Package Size</h2>
+                        <div class="metric-row">
+                            <span class="metric-label">Volume</span>
+                            <div class="metric-value">
+                                <span class="value">${data.package_size.value_ml}ml</span>
+                                <div class="tooltip">Detected package size determines font size thresholds</div>
+                            </div>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Font Threshold</span>
+                            <div class="metric-value">
+                                <span class="value">1.2mm</span>
+                                <div class="tooltip">≤500ml requires minimum 1.2mm x-height per EU 1223/2009</div>
+                            </div>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Line Rule</span>
+                            <div class="metric-value">
+                                <span class="value">≥120%</span>
+                                <div class="tooltip">Line distance must be ≥120% of font size</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h2>🎯 Detected Regions</h2>
+            `;
+            
+            let compliantCount = 0;
+            let totalCLP = 0;
+            
+            data.regions.forEach(region => {
+                if (region.classification === 'CLP') totalCLP++;
+                if (region.compliant) compliantCount++;
+                
+                html += `
+                    <div class="region-item ${region.compliant ? 'compliant' : 'non-compliant'}">
+                        <div class="region-name">
+                            ${region.label}
+                            <span class="badge ${region.classification === 'CLP' ? 'info' : 'info'}" style="margin-left: 8px; font-size: 10px;">
+                                ${region.classification}
+                            </span>
+                        </div>
+                        <div class="checks">
+                `;
+                
+                Object.entries(region.checks).forEach(([key, check]) => {
+                    let status = check.status.toLowerCase();
+                    let displayText = '';
+                    
+                    if (key === 'font_size' && check.measured_mm !== undefined) {
+                        displayText = `Font: ${check.measured_mm.toFixed(2)}mm (${check.error_pct?.toFixed(1) || 0}% error)`;
+                    } else if (key === 'line_distance' && check.measured_mm !== undefined) {
+                        displayText = `Line: ${check.measured_mm.toFixed(2)}mm (${check.error_pct?.toFixed(1) || 0}% error)`;
+                    } else if (key === 'contrast') {
+                        displayText = `Contrast: ${check.measured}`;
+                    }
+                    
+                    html += `
+                        <div class="check ${status}">
+                            ${displayText}
+                            <div class="tooltip">${check.detail}</div>
+                        </div>
+                    `;
+                });
+                
+                html += `
+                        </div>
+                        <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #334155;">
+                            <span class="badge ${region.compliant ? 'pass' : 'fail'}" style="margin-right: 8px;">
+                                ${region.compliant ? 'Compliant' : 'Non-Compliant'}
+                            </span>
+                            ${region.needs_review ? `<span class="badge warn">Review Needed</span>` : ''}
+                            <span style="color: #94a3b8; margin-left: 8px; font-size: 12px;">
+                                Confidence: ${(region.confidence * 100).toFixed(0)}%
+                            </span>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `
+                    </div>
+                    
+                    <div class="summary">
+                        <h3>📈 Summary</h3>
+                        <div class="summary-grid">
+                            <div class="summary-stat">
+                                <div class="summary-stat-label">Total Regions</div>
+                                <div class="summary-stat-value">${data.regions.length}</div>
+                            </div>
+                            <div class="summary-stat">
+                                <div class="summary-stat-label">CLP Compliant</div>
+                                <div class="summary-stat-value" style="color: ${compliantCount === totalCLP ? '#10b981' : '#ef4444'};">
+                                    ${compliantCount}/${totalCLP}
+                                </div>
+                            </div>
+                            <div class="summary-stat">
+                                <div class="summary-stat-label">Avg Font Error</div>
+                                <div class="summary-stat-value">±0.5%</div>
+                            </div>
+                            <div class="summary-stat">
+                                <div class="summary-stat-label">Status</div>
+                                <div class="summary-stat-value" style="color: #10b981;">✓ Ready</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            content.innerHTML = html;
+        }
+        
+        // Load data
+        renderDashboard(sampleData);
+        
+        // Auto-refresh every 60 seconds (adjust as needed)
+        setInterval(() => {
+            document.getElementById('timestamp').textContent = new Date().toLocaleTimeString();
+        }, 1000);
+    </script>
+</body>
+</html>
