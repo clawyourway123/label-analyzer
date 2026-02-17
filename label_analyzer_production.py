@@ -556,7 +556,8 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
    - **STEP 4:** Report measurement with confirmation
      * Height in pixels: X
      * Converted to mm: X / {dpmm:.2f} = Y mm
-     * Measurement method: "x-height-direct" (preferred) or "estimated-from-caps" (if necessary)
+     * Measurement method: "x-height-direct" (preferred) or "cap-height-estimated" (if necessary)
+     * Report the method in your response as 'measurement_method' field
      * Confidence level: 0.9-1.0 if direct measurement, 0.6-0.8 if estimated
 
 2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
@@ -587,10 +588,10 @@ CLP_VALIDATION_SCHEMA = {
         "text_color": {"type": "string", "description": "Described text color"},
         "contrast_assessment": {"type": "string", "description": "Contrast quality (high/medium/low)"},
         "measurement_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How confident in measurements (0-1)"},
-        "measurement_method": {"type": "string", "description": "Method used: 'x-height', 'cap-height-converted', or 'unclear'"},
+        "measurement_method": {"type": "string", "enum": ["x-height-direct", "cap-height-estimated", "unclear"], "description": "Method: x-height-direct (measured lowercase), cap-height-estimated (from all-caps with estimate), unclear (unmeasurable)"},
         "notes": {"type": "string", "description": "Any ambiguities or special observations"}
     },
-    "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence"]
+    "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence", "measurement_method"]
 }
 
 def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
@@ -983,15 +984,15 @@ If you cannot find a size declaration, return value_in_ml=null with low confiden
             logger.info(f"  ✓ Detected package size: {result.get('value')} {result.get('unit')} = {int(value_ml)}ml (confidence: {confidence:.0%})")
             return int(value_ml), confidence
         else:
-            logger.info(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using default 500ml")
+            logger.warning(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using default 500ml — font size thresholds may be inaccurate")
             return 500, 0.0  # Default fallback
             
     except (APIError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Package size detection failed: {e}, using default 500ml")
+        logger.warning(f"Package size detection failed ({type(e).__name__}: {e}), using default 500ml")
         return 500, 0.0
     except Exception as e:
         logger.error(f"Unexpected error in package size detection: {type(e).__name__}: {e}")
-        logger.error("Stack trace:", exc_info=True)
+        logger.warning("Using default 500ml package size (fallback)")
         return 500, 0.0
 
 
