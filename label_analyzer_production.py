@@ -1057,6 +1057,28 @@ class GeminiClient:
             except ImportError:
                 logger.error("google-genai library not installed. Install with: pip install google-genai")
                 raise
+            except Exception as e:
+                # Check if it's a credentials error and provide helpful guidance
+                if "credentials" in str(e).lower() or "authentication" in str(e).lower():
+                    logger.error("=" * 80)
+                    logger.error("GCP CREDENTIALS NOT CONFIGURED")
+                    logger.error("=" * 80)
+                    logger.error("")
+                    logger.error("To use the Label Analyzer, you need to set up Google Cloud credentials:")
+                    logger.error("")
+                    logger.error("Option 1 - Application Default Credentials (recommended for local dev):")
+                    logger.error("  1. Install gcloud CLI: https://cloud.google.com/sdk/docs/install")
+                    logger.error("  2. Run: gcloud auth application-default login")
+                    logger.error("  3. Follow the browser authentication flow")
+                    logger.error("")
+                    logger.error("Option 2 - Service Account Key (recommended for production):")
+                    logger.error("  1. Create a service account with Vertex AI permissions")
+                    logger.error("  2. Download the JSON key file")
+                    logger.error("  3. Set environment variable:")
+                    logger.error("     export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json")
+                    logger.error("")
+                    logger.error("=" * 80)
+                raise
         return self._client
     
     def _calculate_scale_factor(self, original_width: int, original_height: int) -> float:
