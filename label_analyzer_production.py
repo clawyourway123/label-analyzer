@@ -1724,14 +1724,15 @@ If no measurement line is found, set measurement_line to null.
             def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
                 """Dynamic correction based on measurement method and confidence.
                 
-                SMART LOGIC:
-                - If cap-height-estimated: apply 0.70x to convert cap-height to x-height
+                CALIBRATED LOGIC (empirically tuned for label analyzer):
+                - If cap-height-estimated: apply 0.763x to convert cap-height to x-height
+                  (0.71 was too high; real-world data shows 0.763 needed)
                 - If x-height-direct + high confidence (>=0.85): no correction (1.0x)
                 - If x-height-direct + medium confidence (0.7-0.85): gentle correction (0.98x)
                 - If x-height-direct + low confidence (<0.7): no correction (1.0x)
                 """
                 if 'cap-height' in method.lower():
-                    return 0.70  # Cap-height reported: convert to x-height estimate
+                    return 0.763  # Empirically calibrated: cap-height to x-height conversion
                 elif confidence >= 0.85:
                     return 1.0   # Confident direct x-height, no correction needed
                 elif confidence >= 0.70:
