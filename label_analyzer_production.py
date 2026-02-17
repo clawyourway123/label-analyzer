@@ -237,20 +237,39 @@ class DetectedPart:
     
     @property
     def font_size_mm(self) -> float:
-        """Extract font size in mm from compliance check (0.0 if unavailable)."""
-        if self.compliance_check:
-            measurements = self.compliance_check.get("measurements", {})
-            try:
-                return float(measurements.get("font_size_mm") or 0)
-            except (ValueError, TypeError):
+        """Extract font size in mm from compliance check (0.0 if unavailable).
+        
+        Safely handles missing, malformed, or nested measurement data structures.
+        Returns 0.0 if data is unavailable or cannot be parsed.
+        """
+        if not self.compliance_check:
+            return 0.0
+        
+        # Handle both nested and direct measurement storage
+        measurements = self.compliance_check.get("measurements", self.compliance_check)
+        
+        try:
+            font_mm = measurements.get("font_size_mm")
+            if font_mm is None:
                 return 0.0
-        return 0.0
+            return float(font_mm)
+        except (ValueError, TypeError, AttributeError):
+            logger.debug(f"Could not extract font_size_mm from compliance check: {self.compliance_check}")
+            return 0.0
     
     @property
     def compliance_status(self) -> str:
-        """Overall compliance status string (PASS/FAIL/SKIP/ERROR or N/A)."""
-        if self.compliance_check:
-            return self.compliance_check.get("overall_compliance", "N/A")
+        """Overall compliance status string (PASS/FAIL/SKIP/ERROR or N/A).
+        
+        Returns one of: PASS, FAIL, SKIP, ERROR, or N/A (if no compliance check).
+        """
+        if not self.compliance_check:
+            return "N/A"
+        
+        status = self.compliance_check.get("overall_compliance")
+        if status and isinstance(status, str):
+            return status
+        
         return "N/A"
     
     def is_confident(self, threshold: float = 0.7) -> bool:
@@ -2174,8 +2193,24 @@ If no measurement line is found, set measurement_line to null.
             }
             for future in as_completed(futures):
                 idx = futures[future]
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    # Catch any exceptions from the future itself (e.g., TimeoutError)
+                    logger.error(f"Future execution failed for index {idx}: {exc}")
+                    result = BatchResult(
+                        path=image_paths[idx] if idx < len(image_paths) else f"item_{idx}",
+                        error=exc,
+                        elapsed_seconds=0
+                    )
                 results[idx] = result
+                
+                # Log result and invoke callback
+                if result.success:
+                    logger.info(f"  ✓ [{idx+1}/{total}] {result.path}: {len(result.parts)} parts in {result.elapsed_seconds:.1f}s")
+                else:
+                    logger.error(f"  ✗ [{idx+1}/{total}] {result.path}: FAILED in {result.elapsed_seconds:.1f}s")
+                
                 if on_complete:
                     on_complete(result, idx, total)
 
@@ -2243,23 +2278,45 @@ If no measurement line is found, set measurement_line to null.
             writer = csv.DictWriter(f, fieldnames=[
                 "label", "classification", "confidence", "compliant", "needs_review",
                 "font_size_mm", "line_distance_mm", "measurement_confidence",
-                "overall_compliance", "x_min", "y_min", "x_max", "y_max"
+                "overall_compliance", "compliance_confidence", "x_min", "y_min", "x_max", "y_max"
             ])
             writer.writeheader()
             for part in self.detected_parts:
                 # Extract measurements from compliance check if available
+                # Defensive: handle both nested ("measurements" key) and direct storage
                 compliance = part.compliance_check or {}
-                measurements = compliance.get("measurements", {})
+                measurements = compliance.get("measurements", {}) or {}
+                
+                # Safe numeric extraction with fallback
+                def safe_float(value, decimals=4):
+                    """Safely convert to float string or empty string."""
+                    if value is None:
+                        return ""
+                    try:
+                        return f"{float(value):.{decimals}f}"
+                    except (ValueError, TypeError):
+                        return ""
+                
+                def safe_percent(value):
+                    """Safely convert to percentage string or empty string."""
+                    if value is None:
+                        return ""
+                    try:
+                        return f"{float(value):.2%}"
+                    except (ValueError, TypeError):
+                        return ""
+                
                 writer.writerow({
                     "label": part.label,
                     "classification": part.classification.value,
                     "confidence": f"{part.confidence:.2%}",
                     "compliant": part.is_compliant(),
                     "needs_review": part.needs_human_review(),
-                    "font_size_mm": f"{measurements.get('font_size_mm', ''):.4f}" if measurements.get('font_size_mm') else "",
-                    "line_distance_mm": f"{measurements.get('line_distance_mm', ''):.4f}" if measurements.get('line_distance_mm') else "",
-                    "measurement_confidence": f"{measurements.get('measurement_confidence', ''):.2%}" if measurements.get('measurement_confidence') else "",
+                    "font_size_mm": safe_float(measurements.get('font_size_mm')),
+                    "line_distance_mm": safe_float(measurements.get('line_distance_mm')),
+                    "measurement_confidence": safe_percent(measurements.get('measurement_confidence')),
                     "overall_compliance": compliance.get("overall_compliance", ""),
+                    "compliance_confidence": safe_percent(compliance.get("compliance_confidence")),
                     "x_min": part.rect.xmin,
                     "y_min": part.rect.ymin,
                     "x_max": part.rect.xmax,
@@ -2314,11 +2371,16 @@ If no measurement line is found, set measurement_line to null.
                     
                     # Add font size measurement if available
                     if part.compliance_check:
-                        measurements = part.compliance_check.get("measurements", {})
+                        measurements = part.compliance_check.get("measurements", {}) or {}
                         font_mm = measurements.get("font_size_mm")
                         overall = part.compliance_check.get("overall_compliance", "")
-                        if font_mm:
-                            text += f"\n{font_mm:.2f}mm [{overall}]"
+                        
+                        # Safely format font measurement
+                        try:
+                            if font_mm and isinstance(font_mm, (int, float)) and float(font_mm) > 0:
+                                text += f"\n{float(font_mm):.2f}mm [{overall}]"
+                        except (ValueError, TypeError):
+                            pass  # Skip if measurement cannot be formatted
                     
                     draw.text((center_x, center_y), text, fill=color)
                 else:
