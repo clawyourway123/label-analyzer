@@ -493,7 +493,7 @@ def get_clp_validation_prompt(true_dpi: int, dpmm: float, package_size_ml: int =
     The DPI/DPMM values apply to this crop (inherited from original image).
     
     CRITICAL: This prompt MUST measure X-HEIGHT (not full cap height) for accuracy.
-    EU Regulation 1223/2009 specifies x-height, not total character height.
+    EU Regulation 1272/2008 (CLP) specifies x-height, not total character height.
     
     Args:
         true_dpi: Calibrated DPI (from original image)
@@ -509,7 +509,7 @@ The image resolution is {true_dpi} DPI ({dpmm:.2f} pixels per mm).
 
 ### **CRITICAL INSTRUCTION — Measure X-HEIGHT (NOT Full Character Height):**
 
-EU Regulation 1223/2009 CLP compliance requires measuring x-height (the height of lowercase 'x').
+EU Regulation 1272/2008 (CLP) CLP compliance requires measuring x-height (the height of lowercase 'x').
 This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') or descenders (like 'g', 'p', 'y').
 
 **COMMON MISTAKE:** Measuring capital letter height (e.g., 'H') is ~25-30% LARGER than x-height.
@@ -564,7 +564,7 @@ CLP_VALIDATION_SCHEMA = {
 def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
     """Apply CLP rules to measurements. 100% deterministic.
     
-    EU Regulation 1223/2009 Compliance Rules:
+    EU Regulation 1272/2008 (CLP) Compliance Rules:
     - Rule 1: Font size (package-size dependent)
     - Rule 2: Line distance (120% of font size)
     - Rule 3: White background + Black text (STRICT)
@@ -624,7 +624,7 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
     contrast = metrics.get("contrast_assessment", "").lower()
     
     # Rule 1: Font size
-    # EU Regulation 1223/2009: Inner packaging ≤10ml can be smaller (exemption) but must remain easily legible
+    # EU Regulation 1272/2008 (CLP): Inner packaging ≤10ml can be smaller (exemption) but must remain easily legible
     if is_inner_packaging and package_size_ml <= 10:
         # Inner packaging exemption: font can be smaller, but must be measurable and legible
         # No minimum threshold, but must be legible (Gemini should report measurement_confidence)
@@ -647,7 +647,7 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
         line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
     
     # Rule 3: Background & Text Color (STRICT: White background with Black text ONLY)
-    # EU Regulation 1223/2009: CLP text MUST be white background with black letters
+    # EU Regulation 1272/2008 (CLP): CLP text MUST be white background with black letters
     bg_color = metrics.get('background_color', '').lower()
     text_color = metrics.get('text_color', '').lower()
     
@@ -1544,7 +1544,7 @@ If no measurement line is found, set measurement_line to null.
         """
         Stage 3: Two-layer CLP compliance validation
         
-        Implements EU Regulation 1223/2009 CLP rules:
+        Implements EU Regulation 1272/2008 (CLP) CLP rules:
         - Rule 1: Font size (1.2/1.4/1.8mm based on package size)
         - Rule 2: Line distance (≥120% of font)
         - Rule 3: White background + Black text (STRICT)
