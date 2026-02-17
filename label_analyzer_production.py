@@ -547,18 +547,19 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
    
    - **IF ONLY ALL-CAPS TEXT EXISTS:**
      * Look for letters like 'O' or 'I' that DON'T have descenders to identify baseline
-     * Measure the VISIBLE HEIGHT of the capital (not including any space above/below)
-     * **IMPORTANT:** Do NOT apply 0.71 conversion—this causes 20%+ errors
-     * Instead, report: "All-caps text: measured cap-height [X]px from [letter]"
-     * Then analyze the actual font design to estimate true x-height (usually 60-75% of cap-height for CLP fonts)
-     * Report final x-height estimate with lowered confidence if estimated
+     * Measure the VISIBLE HEIGHT of the capital letter (baseline to top, full height)
+     * This is cap-height, NOT x-height—**DO NOT apply 0.71 conversion**
+     * Report: "All-caps text: measured cap-height [X]px from [letter]"
+     * CRITICAL: Provide an ESTIMATED x-height using 0.70 multiplier
+     * Calculate and report: "estimated_xheight_mm = [cap-height-mm] × 0.70"
+     * This allows automatic correction: code will use your estimate directly
    
    - **STEP 4:** Report measurement with confirmation
      * Height in pixels: X
      * Converted to mm: X / {dpmm:.2f} = Y mm
-     * Measurement method: "x-height-direct" (preferred) or "cap-height-estimated" (if necessary)
-     * Report the method in your response as 'measurement_method' field
-     * Confidence level: 0.9-1.0 if direct measurement, 0.6-0.8 if estimated
+     * Measurement method: "x-height-direct" (measured from lowercase) or "cap-height-estimated" (from all-caps with 0.70× estimate)
+     * CRITICAL: If measurement_method is "cap-height-estimated", ALWAYS include the estimated_xheight_mm field
+     * Confidence level: 0.9-1.0 if direct x-height, 0.75-0.85 if cap-height with estimate
 
 2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
    - **MUST** measure from baseline of one line to baseline of next line (NOT top-to-top or bottom-to-bottom)
@@ -589,6 +590,7 @@ CLP_VALIDATION_SCHEMA = {
         "contrast_assessment": {"type": "string", "description": "Contrast quality (high/medium/low)"},
         "measurement_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "How confident in measurements (0-1)"},
         "measurement_method": {"type": "string", "enum": ["x-height-direct", "cap-height-estimated", "unclear"], "description": "Method: x-height-direct (measured lowercase), cap-height-estimated (from all-caps with estimate), unclear (unmeasurable)"},
+        "estimated_xheight_mm": {"type": "number", "description": "If measurement_method is 'cap-height-estimated', this is the estimated x-height in mm (cap-height-mm × 0.70)"},
         "notes": {"type": "string", "description": "Any ambiguities or special observations"}
     },
     "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence", "measurement_method"]
@@ -1719,19 +1721,23 @@ If no measurement line is found, set measurement_line to null.
             # But if confidence is borderline, apply gentle correction to reduce upward bias.
             # This is empirically calibrated: vision models tend to measure ~2-3% high.
             
-            def get_correction_factor(confidence: float) -> float:
-                """Dynamic correction based on measurement confidence.
+            def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
+                """Dynamic correction based on measurement method and confidence.
                 
-                High confidence (>= 0.85): Trust Gemini's measurement (correction = 1.0)
-                Medium confidence (0.7-0.85): Apply gentle correction (0.98)
-                Low confidence (< 0.7): Skip correction, use as-is
+                SMART LOGIC:
+                - If cap-height-estimated: apply 0.70x to convert cap-height to x-height
+                - If x-height-direct + high confidence (>=0.85): no correction (1.0x)
+                - If x-height-direct + medium confidence (0.7-0.85): gentle correction (0.98x)
+                - If x-height-direct + low confidence (<0.7): no correction (1.0x)
                 """
-                if confidence >= 0.85:
-                    return 1.0  # Confident, no correction needed
+                if 'cap-height' in method.lower():
+                    return 0.70  # Cap-height reported: convert to x-height estimate
+                elif confidence >= 0.85:
+                    return 1.0   # Confident direct x-height, no correction needed
                 elif confidence >= 0.70:
                     return 0.98  # Gentle correction for borderline cases
                 else:
-                    return 1.0  # Don't correct uncertain measurements
+                    return 1.0   # Don't correct uncertain measurements
             
             # Safely extract measurements with numeric coercion
             # NOTE: Correction factor is applied AFTER scale factor (below),
@@ -1765,6 +1771,16 @@ If no measurement line is found, set measurement_line to null.
             except (ValueError, TypeError):
                 meas_conf = 0
             
+            # ⭐ CHECK: If Gemini provided estimated_xheight_mm (for cap-height-estimated method),
+            # we'll use that DIRECTLY instead of applying manual correction
+            estimated_xheight_mm = None
+            try:
+                estimated_xheight_mm = float(measurements.get('estimated_xheight_mm') or 0)
+                if estimated_xheight_mm > 0:
+                    logger.info(f"  ℹ️  Gemini provided estimated x-height: {estimated_xheight_mm:.4f}mm")
+            except (ValueError, TypeError):
+                estimated_xheight_mm = None
+            
             # CRITICAL FIX: Apply scale factor to pixel measurements
             # If Gemini resized the image, pixel coordinates are in resized space.
             # We must scale them back to original image space before mm conversion.
@@ -1796,20 +1812,28 @@ If no measurement line is found, set measurement_line to null.
                 measurements['scale_factor_applied'] = scale_factor
             
             # ⭐ Apply x-height correction LAST (after scale factor recalculation)
-            # This ensures correction is applied to the final mm value, not overwritten.
-            correction = get_correction_factor(meas_conf_raw)
+            # PRIORITY: Use Gemini's estimated_xheight_mm if provided (new smart method)
             font_mm_before_correction = font_mm
-            font_mm = font_mm * correction
+            measurement_method = measurements.get('measurement_method', 'x-height-direct')
+            
+            if estimated_xheight_mm and estimated_xheight_mm > 0:
+                # BEST: Use Gemini's explicit estimate (already includes 0.70× correction)
+                font_mm = estimated_xheight_mm
+                correction = 1.0  # Already corrected by Gemini
+                logger.info(f"  ✓ Using Gemini's estimated x-height: {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm")
+            else:
+                # FALLBACK: Apply automatic correction based on method + confidence
+                correction = get_correction_factor(meas_conf_raw, measurement_method)
+                font_mm = font_mm * correction
+                if correction != 1.0:
+                    logger.info(f"  🔧 Applied correction ({correction:.2f}x, method={measurement_method}): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # CRITICAL: Update measurements dict with corrected value for rule validation
-            # Without this, validate_measurements_against_rules() uses uncorrected value!
             measurements['font_size_mm'] = font_mm
             measurements['font_size_mm_before_correction'] = font_mm_before_correction
             measurements['correction_factor_applied'] = correction
             
-            if correction != 1.0:
-                logger.info(f"  🔧 Applied x-height correction ({correction:.2f}x): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
-            else:
+            if correction == 1.0 and not estimated_xheight_mm:
                 logger.info(f"  ✓ X-height measured (no correction needed): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # Get actual cropped image dimensions for logging
