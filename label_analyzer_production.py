@@ -1384,71 +1384,65 @@ class LabelAnalyzer:
         logger.info("Stage 0: DPI Calibration")
         
         prompt = """
-CRITICAL: Find the PRIMARY measurement reference line on this image.
+CRITICAL: Find ALL measurement reference lines on this image (there may be multiple).
 
-SELECTION RULES (in order):
-1. Look for the measurement line labeled "636.07mm" or "636.07" (primary CLP reference)
-2. If not found, look for "662.90mm" or "662.90" (secondary reference)
-3. The line must be CONTINUOUS (not broken) and clearly visible
-4. It must have the MM value labeled next to or on the line
+For EACH line you find:
+- It must have a visible mm label next to or on the line
+- Measure exact pixel coordinates of line start and end
+- READ THE NUMERIC VALUE VERY CAREFULLY (critical for accuracy)
 
-MEASUREMENT (THIS IS CRITICAL FOR CONSISTENCY):
-- Identify the EXACT left/right endpoints of the line
-- Measure pixel coordinates from the LEFTMOST point to the RIGHTMOST point
-- For vertical lines, measure from TOP to BOTTOM
-- Report EXACT pixel coordinates (not approximated)
+IMPORTANT: When reading the mm value, report EXACTLY what you see:
+- Look closely at the numeric label (e.g., "636.07", "662.90", etc.)
+- Read EACH DIGIT carefully: tens, ones, decimal point, decimal places
+- Do NOT approximate or round
+- If label says "636.07mm", report 636.07 (not 637, not 602.6)
+- If you see "662.90mm", report 662.90 exactly
 
-MM VALUE READING:
-- Read the numeric label VERY CAREFULLY
-- Read EACH DIGIT: "636.07" not "637", "662.90" not "663"
-- Do NOT round or approximate
-- Report exactly what the label says
+Return a list of ALL measurement lines found, ordered by length (longest first).
+DO NOT filter—return them ALL so we can analyze all references.
 
-Return:
-- start_point: {x, y} of line start
-- end_point: {x, y} of line end
-- value_mm: The exact MM value (e.g., 636.07 or 662.90)
+For each line:
+- start_point: {x, y} pixel coordinates where line begins
+- end_point: {x, y} pixel coordinates where line ends
+- value_mm: The EXACT numeric mm value labeled on this line (read carefully!)
 - confidence: How confident (0.0 to 1.0)
-- position: Brief description ("bottom of image", "left side", etc.)
 
-If the preferred line (636.07mm or 662.90mm) is not found, return null.
+If no measurement lines found, return empty array.
 """
         
         calibration_schema = {
             "type": "object",
             "properties": {
-                "measurement_line": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "start_point": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
+                "measurement_lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_point": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "integer"},
+                                    "y": {"type": "integer"}
                                 },
-                                "end_point": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
-                                },
-                                "value_mm": {"type": "number"},
-                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                                "position": {"type": "string"}
+                                "required": ["x", "y"]
                             },
-                            "required": ["start_point", "end_point", "value_mm", "confidence"]
+                            "end_point": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "integer"},
+                                    "y": {"type": "integer"}
+                                },
+                                "required": ["x", "y"]
+                            },
+                            "value_mm": {"type": "number"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
                         },
-                        {"type": "null"}
-                    ]
+                        "required": ["start_point", "end_point", "value_mm", "confidence"]
+                    },
+                    "description": "All measurement lines found, ordered by length (longest first)"
                 }
             },
-            "required": ["measurement_line"]
+            "required": ["measurement_lines"]
         }
         
         try:
@@ -1465,12 +1459,25 @@ If the preferred line (636.07mm or 662.90mm) is not found, return null.
             response = json.loads(response_text)
             logger.debug(f"  ✓ Parsed JSON successfully")
             
-            line_data = response.get("measurement_line")
-            if line_data:
+            lines = response.get("measurement_lines", [])
+            if lines:
+                logger.info(f"  🎯 Found {len(lines)} measurement line(s)")
+                for i, l in enumerate(lines):
+                    dist = ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                           (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5
+                    logger.info(f"      Line {i+1}: {dist:.1f}px for {l['value_mm']}mm (confidence: {l.get('confidence', 0.5):.0%})")
+                
+                # Find longest line (most reliable reference)
+                best_line = max(lines, key=lambda l: 
+                    ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                     (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
+                logger.info(f"  ✓ Selecting longest: {best_line['value_mm']}mm")
+                
+                line_data = best_line
                 px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
                               (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
-                logger.info(f"  🎯 Found measurement line: {line_data['value_mm']}mm at {line_data.get('position', '?')} ({px_distance:.1f}px, confidence: {line_data.get('confidence', 0.5):.0%})")
-                logger.info(f"  📏 Pixel coordinates: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']})")
+                
+                logger.info(f"  📏 Measurement: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px")
                 
                 # CRITICAL: Scale coordinates back to original image space
                 # Gemini returns coordinates in its internally-resized space
@@ -1503,7 +1510,7 @@ If the preferred line (636.07mm or 662.90mm) is not found, return null.
                     logger.info(f"✓ Calibration successful: {self.calibration.true_dpi} DPI")
                     return True
             
-            logger.warning(f"✗ Preferred measurement line (636.07mm or 662.90mm) not found in response, using default {self.original_dpi} DPI")
+            logger.info(f"✗ No measurement lines found (response: {response}), using default {self.original_dpi} DPI")
             return False
             
         except json.JSONDecodeError as e:
