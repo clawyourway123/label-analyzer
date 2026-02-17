@@ -1178,7 +1178,8 @@ class LabelAnalyzer:
     def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None,
                  confidence_weights: Optional[Dict[str, float]] = None, use_cache: bool = True,
                  package_size_ml: Optional[int] = None):
-        cache = ResponseCache(cache_dir=cache_dir) if use_cache else ResponseCache(cache_dir=cache_dir)
+        # BUG FIX: Avoid redundant cache creation in both branches
+        cache = ResponseCache(cache_dir=cache_dir)
         if not use_cache:
             cache.disable()
         self.gemini = GeminiClient(project_id, cache=cache)
@@ -1345,6 +1346,13 @@ If no measurement line is found, set measurement_line to null.
                 )
                 
                 if self.calibration.update(line):
+                    # SANITY CHECK: Detect implausible calibration results
+                    # Typical label scans: 150-600 DPI. Outside this range suggests error.
+                    if self.calibration.true_dpi < 50 or self.calibration.true_dpi > 1200:
+                        logger.warning(f"  ⚠️  Calibrated DPI ({self.calibration.true_dpi}) is outside expected range (50-1200)")
+                        logger.warning(f"      This might indicate a failed calibration. Consider manual review.")
+                        logger.warning(f"      Measurement line: {line.value_mm}mm across {((line.end_point.x - line.start_point.x)**2 + (line.end_point.y - line.start_point.y)**2)**0.5:.1f}px")
+                    
                     logger.info(f"✓ Calibration successful: {self.calibration.true_dpi} DPI")
                     return True
             
@@ -1928,11 +1936,22 @@ If no measurement line is found, set measurement_line to null.
                 xmax = min(image.width, int(rect["xmax"]))
                 ymax = min(image.height, int(rect["ymax"]))
                 
-                # Validate crop is non-empty
-                if xmax <= xmin or ymax <= ymin:
+                # Validate crop is non-empty and meets minimum size
+                crop_width = xmax - xmin
+                crop_height = ymax - ymin
+                if crop_width <= 0 or crop_height <= 0:
                     logger.warning(f"Skipping region '{region['label']}': invalid crop bounds ({xmin},{ymin})-({xmax},{ymax})")
                     region["compliance_check"] = {
-                        "error": "Invalid crop coordinates",
+                        "error": "Invalid crop coordinates (zero or negative dimensions)",
+                        "overall_compliance": "SKIP"
+                    }
+                    continue
+                
+                # Check minimum crop size (at least 20x20 pixels to be measurable)
+                if crop_width < 20 or crop_height < 20:
+                    logger.warning(f"Skipping region '{region['label']}': crop too small ({crop_width}×{crop_height}px) - not measurable")
+                    region["compliance_check"] = {
+                        "error": f"Crop too small ({crop_width}×{crop_height}px) - minimum 20×20px required",
                         "overall_compliance": "SKIP"
                     }
                     continue
