@@ -373,19 +373,46 @@ class CalibrationResult:
         self.dpmm = original_dpi / 25.4
         self.measurement_line: Optional[MeasurementLine] = None
         self.is_calibrated = False
+        # Cache: map reference value (mm) → DPI for consistency
+        # If Gemini finds the same reference again (diff pixel coords), reuse same DPI
+        self.reference_dpi_cache = {}
     
     def update(self, line: MeasurementLine):
-        """Update DPI based on measurement line"""
+        """Update DPI based on measurement line
+        
+        CRITICAL: If we've seen this reference value (mm) before, reuse the DPI.
+        This prevents different pixel measurements of the same reference from causing
+        DPI to vary wildly (336 → 247 → 209 for the same 636.07mm reference).
+        """
         px_length = ((line.end_point.x - line.start_point.x)**2 + 
                      (line.end_point.y - line.start_point.y)**2)**0.5
         
         if line.value_mm > 0:
+            # Check if we've calibrated using this reference value before
+            ref_key = round(line.value_mm, 2)  # Round to 2 decimals for matching
+            
+            if ref_key in self.reference_dpi_cache:
+                # Reuse cached DPI for this reference
+                cached_dpi = self.reference_dpi_cache[ref_key]
+                logger.info(f"  ℹ️  Reference {line.value_mm}mm seen before, reusing cached DPI: {cached_dpi} DPI")
+                self.true_dpi = cached_dpi
+                self.dpmm = cached_dpi / 25.4
+                self.measurement_line = line
+                self.is_calibrated = True
+                return True
+            
+            # First time seeing this reference - calculate and cache
             calculated_dpmm = px_length / line.value_mm
-            self.true_dpi = int(round(calculated_dpmm * 25.4))
+            calculated_dpi = int(round(calculated_dpmm * 25.4))
+            
+            # Cache it
+            self.reference_dpi_cache[ref_key] = calculated_dpi
+            
+            self.true_dpi = calculated_dpi
             self.dpmm = calculated_dpmm
             self.measurement_line = line
             self.is_calibrated = True
-            logger.info(f"Calibrated DPI: {self.true_dpi} DPI ({self.dpmm:.2f} px/mm)")
+            logger.info(f"Calibrated DPI: {self.true_dpi} DPI ({self.dpmm:.2f} px/mm) [reference: {line.value_mm}mm]")
             return True
         return False
 
