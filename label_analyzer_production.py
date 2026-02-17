@@ -1438,27 +1438,31 @@ class LabelAnalyzer:
             logger.info(f"  📐 Found {len(region_paths)} glyph paths in region")
             
             # Group paths into text lines by y_center
+            # Use adaptive tolerance: ~40% of most common path height
+            common_h = Counter(round(g['h'], 1) for g in region_paths).most_common(1)[0][0]
+            line_tolerance = max(1.0, common_h * 0.6)  # pts
+            
             region_paths.sort(key=lambda g: g['y_center'])
             text_lines = []
             current_line = [region_paths[0]]
             for g in region_paths[1:]:
-                if abs(g['y_center'] - current_line[-1]['y_center']) < 2.0:  # ~0.7mm tolerance
+                if abs(g['y_center'] - current_line[-1]['y_center']) < line_tolerance:
                     current_line.append(g)
                 else:
-                    if len(current_line) >= 5:  # At least 5 paths = likely a text line
+                    if len(current_line) >= 3:  # Low threshold to avoid skipping short lines
                         text_lines.append(current_line)
                     current_line = [g]
-            if len(current_line) >= 5:
+            if len(current_line) >= 3:
                 text_lines.append(current_line)
             
             if len(text_lines) < 1:
                 logger.info(f"  ⚠️ No text lines detected in region")
                 return None
             
-            logger.info(f"  📐 Detected {len(text_lines)} text lines")
+            logger.info(f"  📐 Detected {len(text_lines)} text lines (tolerance={line_tolerance:.1f}pt)")
             
             # For each text line: group overlapping paths into characters, measure heights
-            all_char_heights_mm = []
+            line_char_heights = []  # Per-line list of character heights in mm
             line_y_centers_mm = []
             
             for line_paths in text_lines:
@@ -1476,31 +1480,86 @@ class LabelAnalyzer:
                 chars.append(current_char)
                 
                 # Measure each character's full height (union of all sub-paths)
-                char_heights_pt = []
+                char_heights_mm = []
                 for ch in chars:
                     top = min(p['y_top'] for p in ch)
                     bot = max(p['y_bot'] for p in ch)
-                    char_heights_pt.append(bot - top)
+                    h_mm = (bot - top) / 72 * 25.4
+                    char_heights_mm.append(h_mm)
                 
-                # Convert to mm
-                char_heights_mm = [h / 72 * 25.4 for h in char_heights_pt]
-                all_char_heights_mm.extend(char_heights_mm)
+                line_char_heights.append(char_heights_mm)
                 
                 # Line y-center for spacing calculation
                 line_y = statistics.median([p['y_center'] for p in line_paths])
                 line_y_centers_mm.append(line_y / 72 * 25.4)
             
+            # Flatten all character heights
+            all_char_heights_mm = [h for line_h in line_char_heights for h in line_h]
             if not all_char_heights_mm:
                 return None
             
-            # Font size = mean of all character heights (matches human measurement method)
-            # This naturally blends lowercase x-height and uppercase cap-height
-            font_size_mm = statistics.mean(all_char_heights_mm)
-            median_font_mm = statistics.median(all_char_heights_mm)
+            # ================================================================
+            # FONT SIZE: Identify body text by LINE height, not char height
+            # ================================================================
+            # Each line has a mix of upper/lowercase — the MEAN char height per line
+            # represents that line's "font size". Cluster LINES by their mean height
+            # to separate body text from headers.
             
-            # Line spacing = median consecutive line distance
+            line_mean_heights = []  # (line_index, mean_char_height_mm)
+            for i, line_h in enumerate(line_char_heights):
+                if line_h:
+                    line_mean_heights.append((i, statistics.mean(line_h)))
+            
+            # Cluster line heights (0.2mm bins)
+            line_h_bins = Counter(round(h, 1) for _, h in line_mean_heights)
+            
+            # Find dominant line height cluster (most lines = body text)
+            best_line_bin = None
+            best_line_count = 0
+            for h_bin, count in line_h_bins.items():
+                total = count
+                for neighbor in [h_bin - 0.1, h_bin + 0.1]:
+                    total += line_h_bins.get(round(neighbor, 1), 0)
+                if total > best_line_count:
+                    best_line_count = total
+                    best_line_bin = h_bin
+            
+            # Collect all characters from body text lines (lines matching dominant cluster)
+            body_line_indices = set()
+            body_char_heights = []
+            for i, mean_h in line_mean_heights:
+                if abs(mean_h - best_line_bin) <= 0.3:  # Body text line
+                    body_line_indices.add(i)
+                    body_char_heights.extend(line_char_heights[i])
+            
+            if body_char_heights and len(body_char_heights) >= 5:
+                font_size_mm = statistics.mean(body_char_heights)
+                median_font_mm = statistics.median(body_char_heights)
+                logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
+            else:
+                font_size_mm = statistics.mean(all_char_heights_mm)
+                median_font_mm = statistics.median(all_char_heights_mm)
+                body_line_indices = set(range(len(text_lines)))
+                logger.info(f"  📐 Using all chars (no clear body text cluster)")
+            
+            # ================================================================
+            # LINE SPACING: Use most common tight spacing between body text lines
+            # ================================================================
+            body_text_line_ys = sorted([line_y_centers_mm[i] for i in body_line_indices])
+            
             line_distance_mm = 0.0
-            if len(line_y_centers_mm) >= 2:
+            if len(body_text_line_ys) >= 2:
+                spacings = [body_text_line_ys[i+1] - body_text_line_ys[i] 
+                           for i in range(len(body_text_line_ys) - 1)]
+                # Use the MODE of spacings (rounded to 0.1mm) for the most common spacing
+                spacing_bins = Counter(round(s, 1) for s in spacings)
+                most_common_spacing = spacing_bins.most_common(1)[0][0]
+                # Average all spacings near the mode (±0.3mm)
+                tight_spacings = [s for s in spacings if abs(s - most_common_spacing) <= 0.3]
+                line_distance_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
+                logger.info(f"  📐 Body text line spacings: {[round(s,2) for s in spacings]}")
+                logger.info(f"  📐 Most common spacing: {most_common_spacing:.1f}mm ({len(tight_spacings)} instances)")
+            elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
                            for i in range(len(line_y_centers_mm) - 1)]
                 line_distance_mm = statistics.median(spacings)
