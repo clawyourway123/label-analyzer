@@ -799,6 +799,88 @@ class ResponseCache:
 
 
 # ============================================================================
+# PACKAGE SIZE DETECTION
+# ============================================================================
+
+def detect_package_size(image_data: Dict, gemini_client: 'GeminiClient', image_width: int, image_height: int) -> Tuple[int, float]:
+    """Detect package/container size from label image using Gemini vision.
+    
+    Looks for volume declarations (ml, L, oz, g, kg, etc.) anywhere on the label.
+    
+    Args:
+        image_data: Base64 image data in Gemini format
+        gemini_client: GeminiClient instance for API calls
+        image_width: Image width in pixels
+        image_height: Image height in pixels
+        
+    Returns:
+        Tuple of (package_size_ml, confidence)
+        - package_size_ml: Detected size in milliliters (defaults to 500ml if not found)
+        - confidence: Confidence in detection (0.0-1.0)
+    """
+    prompt = """
+Scan this product label and identify the package/container size/volume.
+Look for any explicit volume declarations like:
+- "Volume: 250ml"
+- "500mL"
+- "1L" (convert to ml: 1000ml)
+- "250g" (for non-liquid, use weight)
+- "16 fl oz" (convert: ~473ml)
+- "Net: 500ml"
+
+Extract the PRIMARY volume/size declaration (usually near barcode or top of label).
+
+Return ONLY:
+- value: The numeric size value
+- unit: The unit (ml, L, g, oz, fl oz, etc.)
+- value_in_ml: The value converted to milliliters (1L=1000ml, 1oz≈29.57ml, 1fl oz≈29.57ml)
+- confidence: How confident you are (0.0-1.0)
+- location: Brief description of where on label (e.g., "bottom right", "near barcode")
+
+If you cannot find a size declaration, return value_in_ml=null with low confidence.
+"""
+    
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {"type": ["number", "null"]},
+            "unit": {"type": ["string", "null"]},
+            "value_in_ml": {"type": ["number", "null"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "location": {"type": ["string", "null"]},
+            "notes": {"type": "string"}
+        },
+        "required": ["value", "unit", "value_in_ml", "confidence"]
+    }
+    
+    try:
+        logger.info("Stage 0b: Detecting package size from label...")
+        response_text = gemini_client.analyze_image(
+            image_data,
+            prompt,
+            schema,
+            original_width=image_width,
+            original_height=image_height,
+            temperature=0.3  # Very low temp for deterministic size detection
+        )
+        
+        result = json.loads(response_text)
+        value_ml = result.get("value_in_ml")
+        confidence = result.get("confidence", 0.0)
+        
+        if value_ml and confidence >= 0.5:
+            logger.info(f"  ✓ Detected package size: {result.get('value')} {result.get('unit')} = {int(value_ml)}ml (confidence: {confidence:.0%})")
+            return int(value_ml), confidence
+        else:
+            logger.info(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using default 500ml")
+            return 500, 0.0  # Default fallback
+            
+    except Exception as e:
+        logger.warning(f"Package size detection failed: {e}, using default 500ml")
+        return 500, 0.0
+
+
+# ============================================================================
 # BBOX HELPER FUNCTIONS
 # ============================================================================
 
@@ -1025,7 +1107,8 @@ class LabelAnalyzer:
     """Production-ready label analyzer with multi-stage detection"""
     
     def __init__(self, project_id: str, dpi: int = 300, cache_dir: Optional[str] = None,
-                 confidence_weights: Optional[Dict[str, float]] = None, use_cache: bool = True):
+                 confidence_weights: Optional[Dict[str, float]] = None, use_cache: bool = True,
+                 package_size_ml: Optional[int] = None):
         cache = ResponseCache(cache_dir=cache_dir) if use_cache else ResponseCache(cache_dir=cache_dir)
         if not use_cache:
             cache.disable()
@@ -1036,6 +1119,8 @@ class LabelAnalyzer:
         self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
         self._gemini_scale_factor: float = 1.0  # Track coordinate scaling
+        self.package_size_ml: int = package_size_ml or 500  # Default fallback
+        self.package_size_confidence: float = 0.0  # Confidence in detected size
     
     def clear_cache(self) -> int:
         """Clear all cached API responses. Use when analyzing new images.
@@ -1618,7 +1703,7 @@ If no measurement line is found, set measurement_line to null.
     
     def analyze(self, image: PIL_Image.Image, image_data: Dict) -> List[DetectedPart]:
         """
-        Main analysis pipeline: calibrate → detect rough → refine → validate CLP → filter
+        Main analysis pipeline: calibrate → detect package size → detect rough → refine → validate CLP → filter
         
         Returns:
             List of detected parts with high confidence
@@ -1630,8 +1715,16 @@ If no measurement line is found, set measurement_line to null.
         # Store image dimensions for ensemble scoring
         self._image_size = (image.width, image.height)
 
-        # Stage 0: Calibrate DPI
+        # Stage 0a: Calibrate DPI
         self.calibrate_dpi(image, image_data)
+        
+        # Stage 0b: Detect package size (if not provided)
+        if self.package_size_ml == 500 and self.package_size_confidence == 0.0:
+            # Only auto-detect if using default (not explicitly provided)
+            pkg_size, pkg_conf = detect_package_size(image_data, self.gemini, image.width, image.height)
+            self.package_size_ml = pkg_size
+            self.package_size_confidence = pkg_conf
+            logger.info(f"Package size: {self.package_size_ml}ml (confidence: {pkg_conf:.0%})")
         
         # Stage 1: Rough detection
         rough_regions = self.detect_parts_rough(image_data)
@@ -1684,7 +1777,11 @@ If no measurement line is found, set measurement_line to null.
                 cropped = image.crop((xmin, ymin, xmax, ymax))
                 logger.info(f"  ✓ Cropped '{region['label']}': {cropped.width}×{cropped.height}px")
                 
-                compliance = self.validate_clp_compliance(image_data, region, cropped)
+                # Pass detected package size for correct rule application
+                compliance = self.validate_clp_compliance(
+                    image_data, region, cropped,
+                    package_size_ml=self.package_size_ml
+                )
                 region["compliance_check"] = compliance
         
         # Stage 4: Convert & filter (with ensemble scoring)
@@ -1706,6 +1803,7 @@ If no measurement line is found, set measurement_line to null.
         
         logger.info(f"=" * 60)
         logger.info(f"Analysis complete: {len(self.detected_parts)} confident regions detected")
+        logger.info(f"Package size: {self.package_size_ml}ml (confidence: {self.package_size_confidence:.0%})")
         logger.info(f"CLP regions: {len(clp_parts)} total, {len(compliant_parts)} compliant, {non_compliant} non-compliant")
         if review_flagged:
             logger.warning(f"⚠️  HUMAN REVIEW NEEDED: {len(review_flagged)} regions flagged (low confidence or borderline)")
@@ -1836,6 +1934,10 @@ If no measurement line is found, set measurement_line to null.
                 "true_dpi": self.calibration.true_dpi,
                 "dpmm": self.calibration.dpmm,
                 "is_calibrated": self.calibration.is_calibrated
+            },
+            "package_size": {
+                "value_ml": self.package_size_ml,
+                "confidence": self.package_size_confidence
             },
             "detected_parts": [
                 {
