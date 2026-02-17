@@ -1651,7 +1651,10 @@ If no measurement line is found, set measurement_line to null.
                     line_dist_mm = line_dist_px_original / self.calibration.dpmm
                     logger.info(f"    Scaled line distance: {line_dist_px:.1f}px → {line_dist_px_original:.1f}px → {line_dist_mm:.4f}mm")
                 
-                # Update measurements dict for audit trail
+                # CRITICAL: Update measurements dict with scaled values for rule validation
+                # Without this, validate_measurements_against_rules() uses unscaled values!
+                measurements['font_size_mm'] = font_mm
+                measurements['line_distance_mm'] = line_dist_mm
                 measurements['font_size_pixels_original'] = font_px
                 measurements['font_size_pixels_scaled'] = font_px_original
                 measurements['line_distance_pixels_original'] = line_dist_px
@@ -1663,6 +1666,12 @@ If no measurement line is found, set measurement_line to null.
             correction = get_correction_factor(meas_conf_raw)
             font_mm_before_correction = font_mm
             font_mm = font_mm * correction
+            
+            # CRITICAL: Update measurements dict with corrected value for rule validation
+            # Without this, validate_measurements_against_rules() uses uncorrected value!
+            measurements['font_size_mm'] = font_mm
+            measurements['font_size_mm_before_correction'] = font_mm_before_correction
+            measurements['correction_factor_applied'] = correction
             
             if correction != 1.0:
                 logger.info(f"  🔧 Applied x-height correction ({correction:.2f}x): {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
