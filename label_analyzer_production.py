@@ -1295,7 +1295,8 @@ If no measurement line is found, set measurement_line to null.
             img_w, img_h = self._image_size
             response_text = self.gemini.analyze_image(
                 image_data, prompt, calibration_schema,
-                original_width=img_w, original_height=img_h
+                original_width=img_w, original_height=img_h,
+                temperature=0.3  # Low temp for precise coordinate detection (research: 0.0-0.5 optimal)
             )
             
             logger.debug(f"  📥 Raw response: {response_text[:500]}")  # First 500 chars
