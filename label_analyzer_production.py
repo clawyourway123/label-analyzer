@@ -1387,17 +1387,24 @@ class LabelAnalyzer:
 CRITICAL: Find ALL measurement reference lines on this image (there may be multiple).
 
 For EACH line you find:
-- It must have a visible mm label (e.g., "636.07mm", "500mm", etc.)
+- It must have a visible mm label next to or on the line
 - Measure exact pixel coordinates of line start and end
-- Report the labeled mm value
+- READ THE NUMERIC VALUE VERY CAREFULLY (critical for accuracy)
 
-Return a list of all measurement lines found, ordered by length (longest first).
-DO NOT filter or pick one—return them ALL so we can select the best one.
+IMPORTANT: When reading the mm value, report EXACTLY what you see:
+- Look closely at the numeric label (e.g., "636.07", "662.90", etc.)
+- Read EACH DIGIT carefully: tens, ones, decimal point, decimal places
+- Do NOT approximate or round
+- If label says "636.07mm", report 636.07 (not 637, not 602.6)
+- If you see "662.90mm", report 662.90 exactly
+
+Return a list of ALL measurement lines found, ordered by length (longest first).
+DO NOT filter—return them ALL so we can analyze all references.
 
 For each line:
 - start_point: {x, y} pixel coordinates where line begins
 - end_point: {x, y} pixel coordinates where line ends
-- value_mm: The numeric mm value labeled on this line
+- value_mm: The EXACT numeric mm value labeled on this line (read carefully!)
 - confidence: How confident (0.0 to 1.0)
 
 If no measurement lines found, return empty array.
@@ -1454,18 +1461,23 @@ If no measurement lines found, return empty array.
             
             lines = response.get("measurement_lines", [])
             if lines:
-                logger.info(f"  🎯 Found {len(lines)} measurement line(s), selecting longest...")
+                logger.info(f"  🎯 Found {len(lines)} measurement line(s)")
+                for i, l in enumerate(lines):
+                    dist = ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
+                           (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5
+                    logger.info(f"      Line {i+1}: {dist:.1f}px for {l['value_mm']}mm (confidence: {l.get('confidence', 0.5):.0%})")
                 
                 # Find longest line (most reliable reference)
                 best_line = max(lines, key=lambda l: 
                     ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
                      (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
+                logger.info(f"  ✓ Selecting longest: {best_line['value_mm']}mm")
                 
                 line_data = best_line
                 px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
                               (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
                 
-                logger.info(f"  ✓ Selected longest line: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px, value={line_data['value_mm']}mm")
+                logger.info(f"  📏 Measurement: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px")
                 
                 # CRITICAL: Scale coordinates back to original image space
                 # Gemini returns coordinates in its internally-resized space
