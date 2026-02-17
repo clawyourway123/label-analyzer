@@ -1057,7 +1057,7 @@ class GeminiClient:
     
     def analyze_image(self, image_data: Dict, prompt: str, response_schema: Optional[Dict] = None, 
                       original_width: Optional[int] = None, original_height: Optional[int] = None,
-                      temperature: float = 0.7, media_resolution: Optional[str] = None) -> str:
+                      temperature: float = 0.7) -> str:
         """Call Gemini with image and optional structured output.
 
         Results are cached by (image_data, prompt, schema) so repeated
@@ -1098,13 +1098,6 @@ class GeminiClient:
         
         # Set temperature for deterministic results (lower = more precise)
         config["temperature"] = temperature
-        
-        # Gemini 3: Set media_resolution for vision processing fidelity
-        # HIGH = maximum detail for fine text/OCR (more tokens, better accuracy)
-        # MEDIUM = balanced (default)
-        # LOW = fast, lower fidelity
-        if media_resolution:
-            config["media_resolution"] = media_resolution
 
         # Log image size and prompt length
         inline = image_data.get("inline_data", {})
@@ -1576,15 +1569,13 @@ If no measurement line is found, set measurement_line to null.
             crop_w, crop_h = cropped_image.width, cropped_image.height
             
             # Use configured Gemini model for font measurement (Stage 3 is most critical for accuracy)
-            # media_resolution="high" gives Gemini maximum fidelity for fine text measurement
             response_text = self.gemini.analyze_image(
                 cropped_data,
                 validation_prompt,
                 CLP_VALIDATION_SCHEMA,
                 original_width=crop_w,
                 original_height=crop_h,
-                temperature=0.2,  # Very low temperature for deterministic precision
-                media_resolution="high"  # Maximum fidelity for font pixel measurement
+                temperature=0.2  # Very low temperature for deterministic precision
             )
             
             measurements = json.loads(response_text)
