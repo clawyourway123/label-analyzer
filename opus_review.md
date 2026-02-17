@@ -1,92 +1,86 @@
 # Opus Implementation Notes — Label Analyzer
-**Date:** Tuesday, February 17th, 2026 — 2:52 PM PST  
-**Commit:** f3a3051 (text-based x-height + improved clustering)  
-**Status:** MAJOR FIX PUSHED — New primary measurement method
+**Date:** Tuesday, February 17th, 2026 — 3:08 PM PST
+**Commit:** d1f8caf — Origin-based x-height + span size filtering + min height filter
 
 ---
 
 ## What I Implemented
 
-### NEW: Text-Based X-Height Measurement (Primary Method)
+### Fix 1: Origin-Based X-Height Measurement (CRITICAL)
+**The real bug:** `char['bbox']` height = `cb[3] - cb[1]` includes potential below-baseline padding. For x-height characters (a, c, e, m, n, o, r, s, u, v, w, x, z), the glyph sits ON the baseline — any bbox extension below baseline is padding, not actual glyph height.
 
-**The fundamental problem with vector clustering:** `get_drawings()` gives us glyph outlines but we DON'T KNOW which character each outline represents. So we cluster heights and hope the short cluster is lowercase. This is fragile.
+**The fix:** Use `baseline_y - cb[1]` (origin to bbox top) instead of full bbox height. PyMuPDF's `span['origin']` gives the baseline point. For x-height chars that don't descend below baseline, this gives the TRUE x-height.
 
-**The fix:** `page.get_text("rawdict")` gives per-character data including the actual character identity (`c="a"`, `c="x"`, `c="H"`). Now we can:
+**Expected impact on 5000ml:** If the bbox was inflating by ~7% (1.91mm → ~1.78mm), this fix directly addresses the over-measurement. The origin-based approach removes systematic upward bias.
 
-1. Filter for **known x-height chars**: `a, c, e, m, n, o, r, s, u, v, w, x, z` (lowercase, no ascenders/descenders)
-2. Measure their bbox heights directly from PDF coordinates
-3. Take the **median** — done. No clustering, no heuristics, no guessing.
+### Fix 2: Span Size Grouping (Body Text Isolation)
+**Problem:** The text-based measurement was processing ALL spans in the CLP region without filtering by font size. If the region contains headers (larger font) alongside body text, their chars get mixed in, inflating the median.
 
-**Why this should fix the 5000ml problem:**
-- Current: clusters all char heights → mean/peak includes caps → 1.91mm
-- New: measures ONLY lowercase x-height chars → should get ~1.78mm directly
+**The fix:** Group spans by `span['size']`, count chars per size, pick the most common size as "body text", then only measure chars from that size (±0.5pt tolerance).
 
-**Caveat:** This only works if the PDF has actual text objects (not outlined/rasterized text). If text is converted to curves, `get_text()` returns nothing and we fall back to vector clustering.
-
-### Improved Vector Clustering (Fallback)
-
-Per Sonnet's review, I also improved the clustering fallback:
-
-1. **Median cluster centers** (was weighted mean) — prevents drift when outliers merge
-2. **Lowered separation threshold** from 0.3mm to 0.2mm — catches tighter cap/x ratios
-3. **Raised all-caps threshold** from 1.5mm to 1.7mm — avoids false positives on legitimate x-heights
-4. **Added detailed debug logging** — shows raw histogram, merged clusters, and final peaks
-
-### Why I Agree/Disagree with Sonnet
-
-| Sonnet Suggestion | My Action | Reasoning |
-|---|---|---|
-| FIX 1: Debug logging | ✅ Implemented | Essential for diagnosing issues |
-| FIX 2: Median centers | ✅ Implemented | Correct — weighted mean drifts |
-| FIX 3: Lower threshold to 0.2mm | ✅ Implemented | Reasonable for CLP fonts |
-| FIX 4: All-caps threshold to 1.7mm | ✅ Implemented (was 1.5→1.7) | Good catch |
-| Long-term: Font metadata | ⚠️ Partially done | `get_text("rawdict")` gives font size + ascender/descender per span — useful but x-height ratio varies by font |
-| Long-term: Search for 'x' char | ✅ Better approach | I search for ALL x-height chars, not just literal 'x' — more robust with small samples |
-
-### What Sonnet Should Check Next Cycle
-
-1. **Does `get_text("rawdict")` return data for our test PDFs?** If label PDFs have outlined text (common in print-ready files), we'll get no chars and fall back to clustering. Sonnet should review the fallback path output.
-
-2. **The `origin` field:** I'm using `span['origin']` which is a tuple `(x, y)` where `y` is the baseline. In some PyMuPDF versions the structure might differ. Worth verifying.
-
-3. **Char bbox vs glyph bbox:** PyMuPDF rawdict char bboxes may use "small glyph heights" mode which could undercount descenders. For x-height chars (no descenders) this should be fine, but verify.
+### Fix 3: Minimum Height Filter for Vector Clustering
+Added 0.5mm minimum height filter before clustering to exclude subscripts, chemical formulas, and dot/period glyphs that could form a false "x-height" cluster.
 
 ---
 
-## Expected Results After Fix
+## PUSHBACK ON SONNET: The 0.52 Cap-Height Ratio is WRONG
 
-| Label | Before | After (text-based) | After (clustering fallback) | Expected |
-|---|---|---|---|---|
-| 700ml | 1.20mm | ~1.19mm | ~1.20mm | 1.19mm |
-| 5000ml | 1.91mm | ~1.78mm | ~1.78mm (with fixes) | 1.78mm |
+Sonnet recommended changing the all-caps fallback from 0.70 → 0.52. **This is incorrect.**
+
+**The 0.52 figure is x-height/em-size ratio, NOT x-height/cap-height ratio.**
+
+Actual x-height/cap-height ratios for common sans-serif fonts:
+- **Arial:** sxHeight=1062, sCapHeight=1467 → **0.724**
+- **Helvetica:** ~**0.72**
+- **Univers:** ~**0.71**
+
+The current 0.70 multiplier is already slightly conservative (real ratio ~0.72 for CLP-typical fonts). Changing to 0.52 would **massively underestimate** x-height from all-caps text:
+- Cap height 2.5mm × 0.70 = 1.75mm ✅ (correct range)
+- Cap height 2.5mm × 0.52 = 1.30mm ❌ (would falsely FAIL compliant labels)
+
+**Sonnet confused two different ratios.** The TypeDrawers source cited says x-height is 40-52% of the **em**, not of **cap-height**. Cap-height itself is only ~65-75% of em. So x/cap = (0.44-0.52)/(0.65-0.75) ≈ 0.60-0.80.
+
+**Keep 0.70.** If anything, we should increase it slightly to 0.72 for sans-serif fonts.
+
+---
+
+## Why This Should Fix the 5000ml Issue
+
+The 5000ml label measures 1.91mm (expected 1.78mm). That's a 7.3% over-measurement. Three independent causes could each contribute:
+
+1. **Below-baseline bbox padding** (~3-5% inflation) → Fixed by origin-based measurement
+2. **Header text contamination** (~2-3% if even a few header chars sneak in) → Fixed by span size grouping
+3. **Combined effect** → Should bring 1.91mm down to ~1.78mm range
+
+The 700ml label measuring 1.20mm (expected 1.19mm) is only 0.8% off — consistent with these being small systematic biases that scale with font size.
+
+---
+
+## Next Steps
+
+1. **Test both labels** after this commit — need to verify the numbers
+2. If 5000ml is still over-measuring, investigate:
+   - Print actual origin_y vs cb[1] vs cb[3] values for specific chars
+   - Check if `set_small_glyph_heights(True)` further tightens bbox
+3. The gap measurement (1.92mm vs 2.01mm expected for 5000ml) may also improve since font_size_mm feeds into the gap calculation
+
+---
 
 ## Research Notes
 
-### PyMuPDF `get_text("rawdict")` Structure
-```
-span = {
-    'size': 11.0,          # font size in points
-    'font': 'Helvetica',
-    'ascender': 0.833,     # normalized ascender
-    'descender': -0.207,   # normalized descender  
-    'origin': (x, y),      # baseline position
-    'bbox': (x0, y0, x1, y1),
-    'chars': [
-        {'c': 'a', 'bbox': (x0, y0, x1, y1), 'origin': (x, y)},
-        ...
-    ]
-}
-```
+### PyMuPDF char bbox behavior
+- Since v1.19.0, char bbox height is computed "as if small glyph heights had been requested"
+- This means bbox should use actual glyph outlines, not font metrics
+- BUT: the bbox still represents the ink bounding box, which for some glyphs includes slight overshoot above x-height line (optical compensation in font design)
+- Using origin (baseline) as reference point is more reliable than bbox bottom
 
-Key insight: `span['size'] * span['ascender']` ≈ cap height, but x-height requires knowing the font's x-height ratio (typically 0.48-0.55 of em). Measuring actual char bboxes is more reliable.
-
-### CLP Font Requirements (Confirmed)
-- EU Reg 1272/2008 + 2024/2865: font size = x-height of lowercase 'x'
-- Thresholds: ≤500ml: 1.2mm, 500-3000ml: 1.4mm, >3000ml: 1.8mm, >50L: 2.0mm
-- Line spacing: ≥120% of font size (x-height)
-- Sans-serif, high contrast, easily legible
+### CLP x-height definition
+- EU Regulation 1272/2008: "x-height of lowercase 'x'" 
+- ECHA guidance: any x-height character is equivalent (a, c, e, m, etc.)
+- The x-height is measured from baseline to top of flat lowercase letters
+- Our origin-based measurement directly matches this definition
 
 ---
 
-**Opus Status:** ✅ PUSHED  
-**Next cycle:** Await test results + Sonnet review of text-based approach
+**Status:** ✅ IMPLEMENTED AND PUSHED
+**Sonnet:** Please review commit d1f8caf. Note my pushback on the 0.52 ratio — the math doesn't support it. The origin-based measurement is the key fix.

@@ -1774,7 +1774,7 @@ If no clear number is visible, return 0."""
                 rawdict = page2.get_text("rawdict")
                 
                 # X-height chars: lowercase letters without ascenders/descenders
-                XHEIGHT_CHARS = set('acemnorsuvwxz')
+                XHEIGHT_CHARS = set('aceimnorsuvwxz')  # Added 'i' — common, reliable x-height char
                 CAP_CHARS = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 
                 # STEP 1: Collect all spans in region, grouped by font size
@@ -1852,10 +1852,10 @@ If no clear number is visible, return 0."""
                 
                 doc2.close()
                 
-                if len(xheight_pts) >= 5:
+                if len(xheight_pts) >= 3:  # Lowered from 5: even 3 chars gives reliable median
                     text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
                     bbox_xheight_mm = statistics.median(xheight_bbox_pts) / 72 * 25.4
-                    logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars)")
+                    logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars, method=origin-based)")
                     if abs(text_xheight_mm - bbox_xheight_mm) > 0.01:
                         logger.info(f"  📐 TEXT-BASED bbox x-height would be: {bbox_xheight_mm:.3f}mm (origin-based saved {bbox_xheight_mm - text_xheight_mm:.3f}mm)")
                     if len(cap_pts) >= 3:
@@ -1863,9 +1863,9 @@ If no clear number is visible, return 0."""
                         logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
                         logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
                 else:
-                    logger.info(f"  📐 Text extraction found only {len(xheight_pts)} x-height chars (need ≥5) — falling back to vector clustering")
+                    logger.warning(f"  ⚠️  Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
                     if size_char_counts:
-                        logger.info(f"  📐 Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase")
+                        logger.warning(f"  ⚠️  Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase (chars in set: aceimnorsuvwxz)")
             except Exception as e:
                 logger.debug(f"  📐 Text-based measurement failed: {e}")
             
@@ -1991,6 +1991,15 @@ If no clear number is visible, return 0."""
             # Final font size = x-height (CLP requirement)
             font_size_mm = xheight_mm
             median_font_mm = statistics.median(body_char_heights)
+            
+            # Cross-validation: compare text-based vs vector-based if both available
+            if text_xheight_mm is not None and len(peaks) >= 1:
+                vector_xheight = sorted([p[0] for p in peaks[:2]])[0] if len(peaks) >= 2 else peaks[0][0]
+                disagreement_pct = abs(text_xheight_mm - vector_xheight) / text_xheight_mm if text_xheight_mm > 0 else 0
+                if disagreement_pct > 0.15:
+                    logger.warning(f"  ⚠️  Cross-validation: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
+                else:
+                    logger.info(f"  ✓ Cross-validation: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
             
             # ================================================================
             # LINE SPACING (CLP): Visible gap between lines
