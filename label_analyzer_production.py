@@ -421,11 +421,11 @@ class CalibrationResult:
             self.disk_cache_path = cache_dir_path
             try:
                 if cache_dir_path.exists():
-                    with open(cache_dir_path, 'r') as f:
+                    with open(cache_dir_path, r ) as f:
                         self.disk_cache = json.load(f)
                         logger.info(f"[CACHE] Loaded DPI cache with {len(self.disk_cache)} entries")
             except Exception as e:
-                logger.warning(f'[WARN] Failed to load DPI cache: {e}')
+                logger.warning(f"[WARN] Failed to load DPI cache: {e}")
                 self.disk_cache = {}
     
     def lookup_cached_dpi(self, pdf_hash: str) -> Optional[int]:
@@ -461,12 +461,12 @@ class CalibrationResult:
         if self.disk_cache_path:
             try:
                 self.disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.disk_cache_path, 'w') as f:
+                with open(self.disk_cache_path, w ) as f:
                     json.dump(self.disk_cache, f, indent=2)
                 logger.info(f"[CACHE] Saved DPI to cache: {pdf_hash[:8]}... → {dpi} DPI")
                 return True
             except Exception as e:
-                logger.warning(f'[WARN] Failed to save DPI cache: {e}')
+                logger.warning(f"[WARN] Failed to save DPI cache: {e}")
         return False
     
     def update(self, line: MeasurementLine):
@@ -661,7 +661,7 @@ EU Regulation 1272/2008 (CLP) CLP compliance requires measuring x-height (the he
 This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') or descenders (like 'g', 'p', 'y').
 
 **CRITICAL RULE:** You MUST measure x-height directly from lowercase letters. Do NOT estimate or convert.
-- Capital letter height is ~25-30% LARGER than x-height (e.g., 'H' is too tall)
+- Capital letter height is ~25-30% LARGER than x-height (e.g., H  is too tall)
 - Even if text is all capitals, find a mixed-case section or identify the X-HEIGHT from descender analysis
 - If you must approximate from all-caps text, be explicit: "Estimated x-height from [letter]: [value]px"
 
@@ -669,13 +669,13 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
 
 1. **Font size (X-HEIGHT - CRITICAL):** Find the SMALLEST readable text in the CLP section. 
    - **PREFERRED METHOD:** Identify any lowercase letter word (e.g., "natural", "certified", "contains", "hazard", "precaution")
-     * Measure from baseline (bottom of letter) to TOP of x-body (top of 'a', 'e', 'o', 'x', 'n', etc.)
+     * Measure from baseline (bottom of letter) to TOP of x-body (top of 'a', 'e', 'o', 'x', n , etc.)
      * **MUST EXCLUDE:** Ascenders (d, h, k, l, t) and descenders (g, j, p, q, y) - these are taller/shorter
-     * Example: In "text", measure the 'e' or 'x' (NOT the 't')
+     * Example: In "text", measure the 'e' or 'x' (NOT the t )
      * Report: "X-height measured from letter '[letter]' in word '[word]': [X]px = [Y]mm"
    
    - **IF ONLY ALL-CAPS TEXT EXISTS:**
-     * Look for letters like 'O' or 'I' that DON'T have descenders to identify baseline
+     * Look for letters like 'O' or I  that DON'T have descenders to identify baseline
      * Measure the VISIBLE HEIGHT of the capital letter (baseline to top, full height)
      * This is cap-height, NOT x-height—**DO NOT apply 0.71 conversion**
      * Report: "All-caps text: measured cap-height [X]px from [letter]"
@@ -692,7 +692,7 @@ This is the height of lowercase letters WITHOUT ascenders (like 'd', 'k', 'l') o
 
 2. **Line distance (BASELINE-TO-BASELINE - CRITICAL):** Measure the vertical gap between two consecutive lines of text.
    - **MUST** measure from baseline of one line to baseline of next line (NOT top-to-top or bottom-to-bottom)
-   - Baseline = the imaginary line that letters sit on (bottom of 'a', 'e', 'x'; excludes descenders like 'g', 'p')
+   - Baseline = the imaginary line that letters sit on (bottom of 'a', 'e', 'x'; excludes descenders like 'g', p )
    - Report in pixels and mm with confirmation: "Baseline-to-baseline distance: [X]px = [Y]mm"
 
 3. **Background color:** Describe the background of the text region
@@ -1447,7 +1447,7 @@ class GeminiClient:
         cached = self.cache.get(image_data, prompt, response_schema)
         if cached is not None:
             cache_hit_time = time_module.time() - call_start
-            logger.info(f'[CACHE] Cache HIT ({cache_hit_time:.2f}s) - scale factor: {self._last_image_scale_factor:.4f}')
+            logger.info(f"[CACHE] Cache HIT ({cache_hit_time:.2f}s) - scale factor: {self._last_image_scale_factor:.4f}")
             return cached
 
         client = self._get_client()
@@ -1467,7 +1467,7 @@ class GeminiClient:
 
         def _call() -> str:
             api_call_start = time_module.time()
-            logger.info(f'[SCALE] Calling Gemini API (temp={temperature})...')
+            logger.info(f"[SCALE] Calling Gemini API (temp={temperature})...")
             response = client.models.generate_content(
                 model=self.model,
                 contents=[prompt, image_data],
@@ -1562,9 +1562,9 @@ class LabelAnalyzer:
         if img_hash not in self._image_cache:
             # First time seeing this image, encode and cache
             self._image_cache[img_hash] = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
-            logger.debug(f'[CACHE] Cached image (hash: {img_hash[:8]}...)')
+            logger.debug(f"[CACHE] Cached image (hash: {img_hash[:8]}...)")
         else:
-            logger.debug(f'[CACHE] Using cached image (hash: {img_hash[:8]}...)')
+            logger.debug(f"[CACHE] Using cached image (hash: {img_hash[:8]}...)")
         
         return self._image_cache[img_hash]
     
@@ -1587,7 +1587,7 @@ class LabelAnalyzer:
             region["has_been_scaled"] = True
             return region  # No scaling needed
         
-        logger.debug(f'[SCALE] Scaling region '{region.get('label', '?')}' by {scale_factor:.4f}')
+        logger.debug(f"[SCALE] Scaling region {region.get('label', '?')} by {scale_factor:.4f}")
         
         # Scale rectangle
         rect = region.get("rect", {})
@@ -1636,7 +1636,7 @@ class LabelAnalyzer:
         v_lines = []  # (length_mm, x_pt, y_start_pt, y_end_pt)
         for d in all_drawings:
             for item in d.get('items', []):
-                if item[0] == 'l':
+                if item[0] == l :
                     p1, p2 = item[1], item[2]
                     if abs(p1.y - p2.y) < 2:  # horizontal
                         length_mm = abs(p2.x - p1.x)  * PT_TO_MM
@@ -1726,7 +1726,7 @@ If no clear number is visible, return 0."""
                     ocr_results.append((orient, length_mm, read_value, scale))
                     logger.info(f"[SCALE] OCR: {orient} line {length_mm:.2f}mm → label reads {read_value}mm → scale={scale:.4f}")
             except Exception as e:
-                logger.warning(f'[WARN] OCR failed for {orient} {length_mm:.1f}mm line: {e}')
+                logger.warning(f"[WARN] OCR failed for {orient} {length_mm:.1f}mm line: {e}")
                 continue
         
         # Apply scales
@@ -1773,7 +1773,7 @@ If no clear number is visible, return 0."""
                     region_paths.append({
                         'rect': r, 'w': w, 'h': h,
                         'y_top': r[1], 'y_bot': r[3],
-                        'x': r[0], 'x_end': r[2],
+                        x : r[0], 'x_end': r[2],
                         'y_center': (r[1] + r[3]) / 2,
                         'stroke_w': stroke_w
                     })
@@ -1975,7 +1975,7 @@ If no clear number is visible, return 0."""
                 h_lines_mm = []
                 for d in all_drawings:
                     for item in d.get('items', []):
-                        if item[0] == 'l':
+                        if item[0] == l :
                             p1, p2 = item[1], item[2]
                             if abs(p1.y - p2.y) < 2:
                                 length = abs(p2.x - p1.x)  * PT_TO_MM
@@ -2059,7 +2059,7 @@ If no clear number is visible, return 0."""
                             region_paths.append({
                                 'rect': r, 'w': w, 'h': h,
                                 'y_top': r[1], 'y_bot': r[3],
-                                'x': r[0], 'x_end': r[2],
+                                x : r[0], 'x_end': r[2],
                                 'y_center': (r[1] + r[3]) / 2,
                                 'stroke_w': stroke_w
                             })
@@ -2067,7 +2067,7 @@ If no clear number is visible, return 0."""
             doc.close()
             
             if len(region_paths) < 10:
-                logger.info(f'[WARN] Only {len(region_paths)} glyph paths in region — too few for reliable measurement')
+                logger.info(f"[WARN] Only {len(region_paths)} glyph paths in region — too few for reliable measurement")
                 return None
             
             logger.info(f"[MEASURE] Found {len(region_paths)} glyph paths in region")
@@ -2100,7 +2100,7 @@ If no clear number is visible, return 0."""
                 text_lines.append(current_line)
             
             if len(text_lines) < 1:
-                logger.info(f'[WARN] No text lines detected in region')
+                logger.info(f"[WARN] No text lines detected in region")
                 return None
             
             logger.info(f"[MEASURE] Detected {len(text_lines)} text lines (tolerance={line_tolerance:.1f}pt)")
@@ -2202,7 +2202,7 @@ If no clear number is visible, return 0."""
             # PRIMARY: Try text-based x-height measurement (uses actual char identities)
             # ================================================================
             # PyMuPDF get_text("rawdict") gives per-character bboxes WITH the actual
-            # character (e.g. 'a', 'x', 'H'). This lets us measure x-height directly
+            # character (e.g. 'a', 'x', H ). This lets us measure x-height directly
             # from lowercase letters — no clustering heuristics needed.
             text_xheight_mm = None
             text_capheight_mm = None
@@ -2212,7 +2212,7 @@ If no clear number is visible, return 0."""
                 rawdict = page2.get_text("rawdict")
                 
                 # X-height chars: lowercase letters without ascenders/descenders
-                XHEIGHT_CHARS = set('aceimnorsuvwxz')  # Added 'i' — common, reliable x-height char
+                XHEIGHT_CHARS = set('aceimnorsuvwxz')  # Added i  — common, reliable x-height char
                 CAP_CHARS = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 
                 # STEP 1: Collect all spans in region, grouped by font size
@@ -2327,7 +2327,7 @@ If no clear number is visible, return 0."""
                                 # font_data = (basename, ext, subtype, content_bytes)
                                 if font_data and len(font_data) >= 4 and font_data[3]:
                                     font_obj = fitz.Font(fontbuffer=font_data[3])
-                                    # Get glyph bbox for 'x' — height gives x-height ratio
+                                    # Get glyph bbox for x  — height gives x-height ratio
                                     x_glyph_bbox = font_obj.glyph_bbox(ord('x'))
                                     if x_glyph_bbox and x_glyph_bbox.height > 0:
                                         # glyph_bbox is in font units (normalized to font size 1)
@@ -2336,7 +2336,7 @@ If no clear number is visible, return 0."""
                                         glyph_xheight_mm = glyph_xheight_pt  * PT_TO_MM
                                         logger.info(f"[MEASURE] GLYPH-BASED x-height: {glyph_xheight_mm:.3f}mm (font={font_name}, size={font_size_pt}pt, glyph_ratio={x_glyph_bbox.height:.4f})")
                                         
-                                        # Also get cap-height from 'X' glyph
+                                        # Also get cap-height from X  glyph
                                         cap_glyph_bbox = font_obj.glyph_bbox(ord('X'))
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
                                             glyph_capheight_mm = cap_glyph_bbox.height * font_size_pt  * PT_TO_MM
@@ -2355,11 +2355,11 @@ If no clear number is visible, return 0."""
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
                                             text_capheight_mm = glyph_capheight_mm
                                     else:
-                                        logger.debug(f'[MEASURE] Glyph bbox for 'x' not available or zero height')
+                                        logger.debug(f"[MEASURE] Glyph bbox for x  not available or zero height")
                                 else:
-                                    logger.debug(f'[MEASURE] Could not extract font buffer for {font_name} (xref={font_xref})')
+                                    logger.debug(f"[MEASURE] Could not extract font buffer for {font_name} (xref={font_xref})")
                             else:
-                                logger.debug(f'[MEASURE] Font '{font_name}' not found in page fonts for glyph-based measurement')
+                                logger.debug(f"[MEASURE] Font '{font_name}' not found in page fonts for glyph-based measurement")
                     except Exception as glyph_err:
                         logger.warning(f"WARNING: Glyph-based measurement failed for font: {glyph_err}")
                         logger.warning(f"     Falling back to origin-based measurement (less accurate)")
@@ -2394,7 +2394,7 @@ If no clear number is visible, return 0."""
                                         glyph_derived = True
                                         logger.info(f"[MEASURE] ALL-CAPS: Derived x-height from glyph metrics: cap={text_capheight_mm:.3f}mm × {glyph_ratio:.3f} = {text_xheight_mm:.3f}mm")
                     except Exception as e:
-                        logger.debug(f'[MEASURE] Glyph-based all-caps derivation failed: {e}')
+                        logger.debug(f"[MEASURE] Glyph-based all-caps derivation failed: {e}")
                     
                     if not glyph_derived:
                         # Fallback: use 0.85 ratio (typical for CLP label fonts)
@@ -2407,7 +2407,7 @@ If no clear number is visible, return 0."""
                     if size_char_counts:
                         logger.warning(f"WARNING: Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase (chars in set: aceimnorsuvwxz)")
             except Exception as e:
-                logger.debug(f'[MEASURE] Text-based measurement failed: {e}')
+                logger.debug(f"[MEASURE] Text-based measurement failed: {e}")
             
             # ================================================================
             # FALLBACK: Bimodal height clustering from vector paths
@@ -2659,7 +2659,7 @@ If no clear number is visible, return 0."""
                 xheight_mm = statistics.median(body_char_heights)
                 capheight_mm = xheight_mm / 0.70
                 measurement_approach = 'fallback-median'
-                logger.warning(f'[WARN] No clear peaks in height distribution, using median: {xheight_mm:.3f}mm')
+                logger.warning(f"[WARN] No clear peaks in height distribution, using median: {xheight_mm:.3f}mm")
             
             # Final font size = x-height (CLP requirement)
             font_size_mm = xheight_mm
@@ -2773,7 +2773,7 @@ If no clear number is visible, return 0."""
             # If c2c spacing < font size, measurements are unreliable (curved label wrap)
             measurement_reliable = True
             if center_to_center_mm > 0 and center_to_center_mm < font_size_mm * 0.8:
-                logger.warning(f'[WARN] UNRELIABLE: c2c ({center_to_center_mm:.3f}mm) < font size ({font_size_mm:.3f}mm) — likely curved/distorted text')
+                logger.warning(f"[WARN] UNRELIABLE: c2c ({center_to_center_mm:.3f}mm) < font size ({font_size_mm:.3f}mm) — likely curved/distorted text")
                 measurement_reliable = False
                 line_distance_mm = 0.0  # Don't report garbage gap
             
@@ -2806,7 +2806,7 @@ If no clear number is visible, return 0."""
             }
             
         except Exception as e:
-            logger.warning(f'[WARN] PDF vector font measurement failed: {e}')
+            logger.warning(f"[WARN] PDF vector font measurement failed: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -2977,11 +2977,11 @@ If no measurement lines found, return empty array.
             
             logger.debug(f"  📥 Raw response: {response_text[:500]}")  # First 500 chars
             response = json.loads(response_text)
-            logger.debug(f'[OK] Parsed JSON successfully')
+            logger.debug(f"[OK] Parsed JSON successfully")
             
             lines = response.get("measurement_lines", [])
             if lines:
-                logger.info(f'[TARGET] Found {len(lines)} measurement line(s)')
+                logger.info(f"[TARGET] Found {len(lines)} measurement line(s)")
                 for i, l in enumerate(lines):
                     dist = ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
                            (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5
@@ -3003,7 +3003,7 @@ If no measurement lines found, return empty array.
                 # Gemini returns coordinates in its internally-resized space
                 scale_factor = self.gemini._last_image_scale_factor
                 if scale_factor != 1.0:
-                    logger.info(f'[SCALE] Scaling calibration coordinates by {scale_factor:.4f}')
+                    logger.info(f"[SCALE] Scaling calibration coordinates by {scale_factor:.4f}")
                     line_data["start_point"]["x"] = int(round(line_data["start_point"]["x"] * scale_factor))
                     line_data["start_point"]["y"] = int(round(line_data["start_point"]["y"] * scale_factor))
                     line_data["end_point"]["x"] = int(round(line_data["end_point"]["x"] * scale_factor))
@@ -3176,7 +3176,7 @@ If no measurement lines found, return empty array.
             # Parse refined_box_2d if provided
             refined_box_2d = response.get("refined_box_2d")
             if refined_box_2d:
-                logger.debug(f'[MEASURE] Refined box_2d: {refined_box_2d}')
+                logger.debug(f"[MEASURE] Refined box_2d: {refined_box_2d}")
                 new_rect = denormalize_box_2d(refined_box_2d, img_w, img_h)
             else:
                 new_rect = None
@@ -3205,7 +3205,7 @@ If no measurement lines found, return empty array.
                     }
                     for p in response["polygon_points"]
                 ]
-                logger.debug(f'[MEASURE] Denormalized {len(refined['polygon_points'])} polygon points for '{label}'')
+                logger.debug(f"[MEASURE] Denormalized {len(refined['polygon_points'])} polygon points for '{label}'")
             
             out_rect = refined.get('rect', {})
             if out_rect:
@@ -3398,7 +3398,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 """CLP compliance correction factor.
                 
                 EU Regulation 1272/2008 (CLP) defines font size as x-height
-                (height of lowercase 'x'). No conversion to cap-height is needed.
+                (height of lowercase x ). No conversion to cap-height is needed.
                 
                 Previous code applied 1.483× to convert x-height → cap-height,
                 but this was INCORRECT: CLP thresholds (1.2mm, 1.4mm, 1.8mm)
@@ -3461,7 +3461,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             # The scale_factor is calculated from original image dimensions passed above.
             scale_factor = self.gemini._last_image_scale_factor
             if scale_factor != 1.0:
-                logger.info(f'[SCALE] Scaling measurements by {scale_factor:.4f} (Gemini resized image)')
+                logger.info(f"[SCALE] Scaling measurements by {scale_factor:.4f} (Gemini resized image)")
                 # Scale pixel values back to original image space
                 font_px_original = font_px * scale_factor
                 line_dist_px_original = line_dist_px * scale_factor
@@ -3711,7 +3711,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                     logger.info(f"  📝 No cached DPI found, will calibrate during vector measurement")
                     self._pdf_hash = pdf_hash  # Store for later caching
             except Exception as e:
-                logger.warning(f'[WARN] Failed to compute PDF hash: {e}')
+                logger.warning(f"[WARN] Failed to compute PDF hash: {e}")
                 self._pdf_hash = None
         else:
             self.calibrate_dpi(image, image_data)
@@ -3885,7 +3885,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             results = LabelAnalyzer.analyze_batch(
                 ["label1.jpg", "label2.pdf"],
                 project_id="my-project",
-                on_complete=lambda r, i, n: logger.info(f'[{i+1}/{n}] {r.path}: {'OK' if r.success else 'FAIL'}'),
+                on_complete=lambda r, i, n: logger.info(f"[{i+1}/{n}] {r.path}: {'OK' if r.success else 'FAIL'}"),
             )
             for r in results:
                 if r.success:
@@ -4206,7 +4206,7 @@ def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer,
             image_dpi = raw_dpi
             logger.info(f"[OK] Extracted DPI from image metadata: {image_dpi} DPI")
         elif raw_dpi:
-            logger.info(f'[WARN]  Ignoring low metadata DPI ({raw_dpi}) - likely JFIF default, using {image_dpi} DPI')
+            logger.info(f"[WARN]  Ignoring low metadata DPI ({raw_dpi}) - likely JFIF default, using {image_dpi} DPI")
         else:
             logger.info(f"[INFO] No valid DPI in image metadata, using default: {image_dpi} DPI")
     else:
