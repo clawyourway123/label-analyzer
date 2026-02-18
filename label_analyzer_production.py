@@ -1714,11 +1714,15 @@ If no clear number is visible, return 0."""
                         h = r[3] - r[1]
                         # Filter for text-glyph-sized elements
                         if 0.3 < h < 20 and 0.1 < w < 30:
+                            # Store stroke width for height adjustment
+                            # (rendered glyphs extend by this amount beyond the mathematical bbox)
+                            stroke_w = d.get('width', 0) or 0
                             region_paths.append({
                                 'rect': r, 'w': w, 'h': h,
                                 'y_top': r[1], 'y_bot': r[3],
                                 'x': r[0], 'x_end': r[2],
-                                'y_center': (r[1] + r[3]) / 2
+                                'y_center': (r[1] + r[3]) / 2,
+                                'stroke_w': stroke_w
                             })
             
             doc.close()
@@ -1781,11 +1785,17 @@ If no clear number is visible, return 0."""
                 chars.append(current_char)
                 
                 # Measure each character's full height (union of all sub-paths)
+                # CRITICAL: Account for stroke width, which extends the visual extent
+                # PyMuPDF's bbox doesn't include stroke, but rendered pixels do.
+                # Add full stroke width (extends on both top and bottom of the path)
                 char_heights_mm = []
                 for ch in chars:
                     top = min(p['y_top'] for p in ch)
                     bot = max(p['y_bot'] for p in ch)
-                    h_mm = (bot - top) / 72 * 25.4
+                    # Use maximum stroke width among paths in this character
+                    stroke_w_pt = max([p.get('stroke_w', 0) or 0 for p in ch]) if ch else 0
+                    # Visual height = bbox height + full stroke width
+                    h_mm = (bot - top + stroke_w_pt) / 72 * 25.4
                     char_heights_mm.append(h_mm)
                 
                 line_char_heights.append(char_heights_mm)
@@ -2044,21 +2054,40 @@ If no clear number is visible, return 0."""
             for h, c in height_bins.most_common(10):
                 logger.info(f"       {h:.2f}mm: {c} chars")
             
-            # Cluster nearby bins (within 0.08mm) into groups
-            # Use MEDIAN for cluster center (prevents drift from outliers)
+            # Cluster nearby bins using ADAPTIVE TOLERANCE
+            # Improved algorithm: Start with strict tolerance (±0.05mm), then merge if needed
             sorted_heights = sorted(height_bins.keys())
+            
+            # Try strict tolerance first (±0.05mm) to preserve peak structure
             clusters = []  # list of [center, total_count, [member_heights]]
             for h in sorted_heights:
                 count = height_bins[h]
                 merged = False
+                # Prefer tight clustering to identify distinct peaks
                 for cluster in clusters:
-                    if abs(h - cluster[0]) <= 0.08:
+                    if abs(h - cluster[0]) <= 0.05:
                         cluster[1] += count
-                        cluster[2].extend([h] * count)  # Add with multiplicity for proper median
+                        cluster[2].extend([h] * count)
                         merged = True
                         break
                 if not merged:
                     clusters.append([h, count, [h] * count])
+            
+            # If we got too many clusters (>8), relax tolerance to ±0.08mm
+            if len(clusters) > 8:
+                logger.info(f"  📐 Too many clusters ({len(clusters)}) with tight tolerance, relaxing to ±0.08mm")
+                clusters = []
+                for h in sorted_heights:
+                    count = height_bins[h]
+                    merged = False
+                    for cluster in clusters:
+                        if abs(h - cluster[0]) <= 0.08:
+                            cluster[1] += count
+                            cluster[2].extend([h] * count)
+                            merged = True
+                            break
+                    if not merged:
+                        clusters.append([h, count, [h] * count])
             
             # Recalculate centers as MEDIAN (prevents drift)
             for cluster in clusters:
