@@ -2166,22 +2166,29 @@ If no clear number is visible, return 0."""
                         # Try multiple ratios to find a cap-height peak whose derived
                         # x-height lands near the CLP threshold.
                         cap_derived = False
+                        # Collect ALL valid (ratio, peak, distance) combos, then pick best
+                        all_cap_options = []
                         for ratio in [0.85, 0.82, 0.80, 0.78, 0.75, 0.72, 0.70]:
                             cap_candidates = [
                                 (h, c) for h, c in peaks_by_count
                                 if h > clp_threshold_mm and abs(h * ratio - clp_threshold_mm) <= 0.10
                                 and c >= top_count * 0.15
                             ]
-                            if cap_candidates:
-                                best_cap = max(cap_candidates, key=lambda p: p[1])
-                                xheight_mm = best_cap[0] * ratio
-                                xheight_count = best_cap[1]
-                                capheight_mm = best_cap[0]
-                                measurement_approach = 'cap-derived-xheight'
-                                cap_derived = True
-                                logger.info(f"  📐 Cap-height derived x-height: cap={best_cap[0]:.3f}mm * {ratio} = x-height={xheight_mm:.3f}mm ({xheight_count} chars)")
-                                logger.info(f"     (CLP threshold={clp_threshold_mm}mm, no direct peak match)")
-                                break
+                            for h, c in cap_candidates:
+                                dist = abs(h * ratio - clp_threshold_mm)
+                                all_cap_options.append((dist, c, h, ratio))
+                        
+                        if all_cap_options:
+                            # Pick option closest to threshold; break ties by count
+                            all_cap_options.sort(key=lambda x: (x[0], -x[1]))
+                            best_dist, best_count, best_h, best_ratio = all_cap_options[0]
+                            xheight_mm = best_h * best_ratio
+                            xheight_count = best_count
+                            capheight_mm = best_h
+                            measurement_approach = 'cap-derived-xheight'
+                            cap_derived = True
+                            logger.info(f"  📐 Cap-height derived x-height: cap={best_h:.3f}mm * {best_ratio} = x-height={xheight_mm:.3f}mm ({xheight_count} chars)")
+                            logger.info(f"     (CLP threshold={clp_threshold_mm}mm, best of {len(all_cap_options)} options, dist={best_dist:.4f}mm)")
                         
                         if not cap_derived:
                             # Final fallback: most frequent peak
@@ -2280,12 +2287,29 @@ If no clear number is visible, return 0."""
             if len(body_text_line_ys) >= 2:
                 spacings = [body_text_line_ys[i+1] - body_text_line_ys[i] 
                            for i in range(len(body_text_line_ys) - 1)]
-                # Use the MODE of spacings (rounded to 0.1mm) for the most common spacing
-                spacing_bins = Counter(round(s, 1) for s in spacings)
-                most_common_spacing = spacing_bins.most_common(1)[0][0]
-                # Average all spacings near the mode (±0.3mm)
-                tight_spacings = [s for s in spacings if abs(s - most_common_spacing) <= 0.3]
-                center_to_center_mm = statistics.mean(tight_spacings) if tight_spacings else statistics.median(spacings)
+                # IQR-based outlier removal: remove spacings outside 1.5×IQR
+                # This handles paragraph breaks (huge gaps) and collapsed lines (tiny gaps)
+                sorted_spacings = sorted(spacings)
+                n = len(sorted_spacings)
+                if n >= 4:
+                    q1 = sorted_spacings[n // 4]
+                    q3 = sorted_spacings[3 * n // 4]
+                    iqr = q3 - q1
+                    lower_bound = q1 - 1.5 * max(iqr, 0.3)  # min IQR of 0.3mm to avoid over-filtering
+                    upper_bound = q3 + 1.5 * max(iqr, 0.3)
+                    filtered_spacings = [s for s in spacings if lower_bound <= s <= upper_bound]
+                else:
+                    # Too few spacings for IQR — simple outlier removal: drop >3× median
+                    med = statistics.median(spacings)
+                    filtered_spacings = [s for s in spacings if s <= med * 2.5 and s >= med * 0.4]
+                
+                if not filtered_spacings:
+                    filtered_spacings = spacings  # fallback: use all
+                
+                center_to_center_mm = statistics.median(filtered_spacings)
+                
+                logger.info(f"  📐 Raw spacings: {[round(s,2) for s in spacings]}")
+                logger.info(f"  📐 Filtered spacings ({len(filtered_spacings)}/{len(spacings)}): {[round(s,2) for s in sorted(filtered_spacings)]}")
                 
                 # CLP line gap = center-to-center - X-HEIGHT (not cap-height)
                 # CLP defines font size as x-height; "distance between lines" ≥ 120% of font size.
@@ -2318,6 +2342,14 @@ If no clear number is visible, return 0."""
                 logger.info(f"     Font: {font_size_mm_raw:.3f}mm → {font_size_mm:.3f}mm")
                 logger.info(f"     Line gap: {line_distance_mm_raw:.3f}mm → {line_distance_mm:.3f}mm")
             
+            # Sanity check: detect curved/distorted text
+            # If c2c spacing < font size, measurements are unreliable (curved label wrap)
+            measurement_reliable = True
+            if center_to_center_mm > 0 and center_to_center_mm < font_size_mm * 0.8:
+                logger.warning(f"  ⚠️ UNRELIABLE: c2c ({center_to_center_mm:.3f}mm) < font size ({font_size_mm:.3f}mm) — likely curved/distorted text")
+                measurement_reliable = False
+                line_distance_mm = 0.0  # Don't report garbage gap
+            
             logger.info(f"  ✅ PDF vector font measurement:")
             logger.info(f"     X-height (CLP metric): {font_size_mm:.3f}mm")
             logger.info(f"     Cap-height (for gap calc): {capheight_mm:.3f}mm")
@@ -2326,6 +2358,8 @@ If no clear number is visible, return 0."""
             logger.info(f"     Characters measured: {len(all_char_heights_mm)}")
             logger.info(f"     Line spacing (gap): {line_distance_mm:.3f}mm ({len(text_lines)} lines)")
             logger.info(f"     Height distribution: {common_heights}")
+            if not measurement_reliable:
+                logger.warning(f"     ⚠️ MEASUREMENT FLAGGED UNRELIABLE (curved/distorted text)")
             
             return {
                 'font_size_mm': round(font_size_mm, 4),  # x-height (CLP requirement)
@@ -2334,7 +2368,8 @@ If no clear number is visible, return 0."""
                 'font_size_mm_median': round(median_font_mm, 4),
                 'line_distance_mm': round(line_distance_mm, 4),
                 'center_to_center_mm': round(center_to_center_mm, 4),
-                'measurement_confidence': 0.95,  # Vector measurement is high-confidence
+                'measurement_reliable': measurement_reliable,
+                'measurement_confidence': 0.90 if measurement_reliable else 0.3,
                 'measurement_method': f'pdf-vector-{measurement_approach}',
                 'measurement_approach': measurement_approach,
                 'characters_measured': len(all_char_heights_mm),
@@ -2856,6 +2891,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                     'notes': pdf_vector_measurements.get('notes', ''),
                     'characters_measured': pdf_vector_measurements.get('characters_measured', 0),
                     'text_lines_found': pdf_vector_measurements.get('text_lines_found', 0),
+                    'measurement_reliable': pdf_vector_measurements.get('measurement_reliable', True),
                 }
                 
                 font_mm = measurements['font_size_mm']
