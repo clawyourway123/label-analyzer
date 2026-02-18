@@ -101,25 +101,31 @@ class Polygon(BaseModel):
     points: List[Point]
     
     def to_list_of_tuples(self) -> List[Tuple[int, int]]:
+        """Convert polygon points to list of (x, y) tuples."""
         return [(p.x, p.y) for p in self.points]
 
 
 class Rectangle(BaseModel):
+    """Axis-aligned rectangle with integer coordinates."""
     xmin: int
     ymin: int
     xmax: int
     ymax: int
     
     def width(self) -> int:
+        """Calculate rectangle width in pixels."""
         return self.xmax - self.xmin
     
     def height(self) -> int:
+        """Calculate rectangle height in pixels."""
         return self.ymax - self.ymin
     
     def area(self) -> int:
+        """Calculate rectangle area in square pixels."""
         return self.width() * self.height()
     
     def center(self) -> Tuple[int, int]:
+        """Return center point coordinates (x, y)."""
         return ((self.xmin + self.xmax) // 2, (self.ymin + self.ymax) // 2)
 
 
@@ -719,6 +725,128 @@ CLP_VALIDATION_SCHEMA = {
     "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence", "measurement_method"]
 }
 
+def _validate_font_size_rule(font_mm: float, package_size_ml: int, 
+                              is_inner_packaging: bool, measurement_confidence: float) -> Dict:
+    """Validate Rule 1: Font size (CLP Regulation 1272/2008).
+    
+    Args:
+        font_mm: Measured font size in mm
+        package_size_ml: Container size in ml
+        is_inner_packaging: True if ≤10ml inner packaging
+        measurement_confidence: Confidence score (0-1)
+        
+    Returns:
+        Dict with status, detail, threshold_mm, measured_mm, pass
+    """
+    if is_inner_packaging and package_size_ml <= 10:
+        font_pass = font_mm > 0 and measurement_confidence >= 0.7
+        font_status = "PASS" if font_pass else "UNCLEAR"
+        font_detail = f"{font_mm:.2f} mm (Inner pkg ≤10ml exemption — must remain legible, confidence: {measurement_confidence:.0%})"
+        min_font_mm = 0  # No minimum threshold for inner packaging
+    else:
+        if package_size_ml <= 500:
+            min_font_mm = 1.2
+            pkg_label = "≤500ml"
+        elif package_size_ml <= 3000:
+            min_font_mm = 1.4
+            pkg_label = "500-3000ml"
+        else:
+            min_font_mm = 1.8
+            pkg_label = ">3000ml"
+        
+        font_pass = font_mm >= min_font_mm
+        font_status = "PASS" if font_pass else "FAIL"
+        font_detail = f"{font_mm:.2f} mm ({pkg_label} requires ≥{min_font_mm}mm)"
+    
+    return {
+        "status": font_status,
+        "detail": font_detail,
+        "threshold_mm": min_font_mm,
+        "measured_mm": font_mm,
+        "pass": font_pass
+    }
+
+
+def _validate_line_distance_rule(line_mm: float, font_mm: float) -> Dict:
+    """Validate Rule 2: Line distance ≥ 120% of font size (CLP).
+    
+    Args:
+        line_mm: Measured line distance in mm
+        font_mm: Font size in mm
+        
+    Returns:
+        Dict with status, detail, threshold_mm, measured_mm, pass
+    """
+    min_line_mm = font_mm * 1.2
+    
+    if line_mm <= 0:
+        return {
+            "status": "UNCLEAR",
+            "detail": "Line distance not measurable",
+            "threshold_mm": min_line_mm,
+            "measured_mm": line_mm,
+            "pass": None
+        }
+    
+    line_pass = line_mm >= min_line_mm
+    line_status = "PASS" if line_pass else "FAIL"
+    line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
+    
+    return {
+        "status": line_status,
+        "detail": line_detail,
+        "threshold_mm": min_line_mm,
+        "measured_mm": line_mm,
+        "pass": line_pass
+    }
+
+
+def _validate_contrast_rule(metrics: Dict) -> Dict:
+    """Validate Rule 3: High contrast (CLP Regulation 1272/2008).
+    
+    Valid combinations:
+    - White background + black text (primary)
+    - Yellow background + black text + high contrast
+    - Dark background + white text + high contrast
+    
+    Args:
+        metrics: Dict with background_color, text_color, contrast_assessment
+        
+    Returns:
+        Dict with status, detail, measured, pass
+    """
+    bg_color = metrics.get('background_color', '').lower()
+    text_color = metrics.get('text_color', '').lower()
+    contrast_assess = metrics.get('contrast_assessment', 'medium').lower()
+    
+    # Color detection
+    is_white_bg = any(w in bg_color for w in ['white', 'off-white', 'ivory', 'cream', 'light'])
+    is_yellow_bg = any(w in bg_color for w in ['yellow', 'gold', 'amber', 'orange-yellow', 'mustard'])
+    is_dark_bg = any(w in bg_color for w in ['dark', 'black', 'navy', 'purple', 'deep'])
+    is_black_text = any(w in text_color for w in ['black', 'dark', 'dark gray', 'dark grey', 'charcoal'])
+    is_white_text = any(w in text_color for w in ['white', 'light', 'cream', 'ivory'])
+    is_high_contrast = contrast_assess in ['high', 'very high', 'excellent']
+    
+    # Rule: (White + Black) OR (Yellow + Black + HighContrast) OR (Dark + White + HighContrast)
+    contrast_pass = ((is_white_bg and is_black_text) or 
+                     (is_yellow_bg and is_black_text and is_high_contrast) or
+                     (is_dark_bg and is_white_text and is_high_contrast))
+    
+    contrast_status = "PASS" if contrast_pass else "FAIL"
+    
+    if contrast_pass:
+        detail = f"High contrast: {metrics.get('background_color', '?')} bg + {metrics.get('text_color', '?')} text"
+    else:
+        detail = f"Low contrast: {metrics.get('background_color', '?')} bg + {metrics.get('text_color', '?')} text ({contrast_assess})"
+    
+    return {
+        "status": contrast_status,
+        "detail": detail,
+        "measured": metrics.get("contrast_assessment"),
+        "pass": contrast_pass
+    }
+
+
 def validate_measurements_against_rules(
     metrics: Dict,
     package_size_ml: int = 500,
@@ -726,147 +854,73 @@ def validate_measurements_against_rules(
 ) -> Dict:
     """Validate measured font/spacing against EU CLP Regulation 1272/2008.
     
-    Applies three core rules:
-    - Rule 1 (Font Size): Package-size dependent thresholds
-      - ≤500ml: ≥1.2mm | 500-3000ml: ≥1.4mm | >3000ml: ≥1.8mm
-      - Inner packaging ≤10ml: exemption (must remain legible)
-    - Rule 2 (Line Distance): Must be ≥120% of font size
-    - Rule 3 (Contrast): White bg + black text required (or yellow + black)
-    
-    Safety: Returns "SKIP" when measurement confidence <0.5 (too uncertain to evaluate).
+    Applies three core rules using helper validators. Returns "SKIP" if 
+    measurement confidence < 0.5 (too uncertain).
     
     Args:
-        metrics: Dict containing font_size_mm, line_distance_mm, contrast_assessment, etc.
+        metrics: Dict with font_size_mm, line_distance_mm, contrast_assessment, etc.
         package_size_ml: Container size in ml (determines font threshold)
-        is_inner_packaging: True if ≤10ml inner packaging (uses exemption)
+        is_inner_packaging: True if ≤10ml inner packaging (exemption applies)
     
     Returns:
-        Dict with rule_results, overall_compliance ("PASS"|"FAIL"|"SKIP"), and compliance_confidence
+        Dict with rule_1_font_size, rule_2_line_distance, rule_3_background_contrast,
+        overall_compliance, and compliance_confidence
     """
-    
-    # Check if measurements are too uncertain to evaluate
     measurement_confidence = metrics.get("measurement_confidence", 0)
+    
+    # Skip validation if confidence too low
     if measurement_confidence < 0.5:
-        logger.warning(f"WARNING: Measurement confidence too low ({measurement_confidence:.2f}), marking as SKIP")
+        logger.warning(f"Measurement confidence too low ({measurement_confidence:.2f}), marking SKIP")
         return {
-            "rule_1_font_size": {
-                "status": "SKIP",
-                "detail": "Measurement confidence too low",
-                "threshold_mm": 0,
-                "measured_mm": metrics.get("font_size_mm", 0),
-                "pass": None
-            },
-            "rule_2_line_distance": {
-                "status": "SKIP",
-                "detail": "Measurement confidence too low",
-                "threshold_mm": 0,
-                "measured_mm": metrics.get("line_distance_mm", 0),
-                "pass": None
-            },
-            "rule_3_background_contrast": {
-                "status": "SKIP",
-                "detail": "Measurement confidence too low",
-                "measured": metrics.get("contrast_assessment"),
-                "pass": None
-            },
+            "rule_1_font_size": {"status": "SKIP", "detail": "Confidence too low", "threshold_mm": 0,
+                                "measured_mm": metrics.get("font_size_mm", 0), "pass": None},
+            "rule_2_line_distance": {"status": "SKIP", "detail": "Confidence too low", "threshold_mm": 0,
+                                    "measured_mm": metrics.get("line_distance_mm", 0), "pass": None},
+            "rule_3_background_contrast": {"status": "SKIP", "detail": "Confidence too low",
+                                          "measured": metrics.get("contrast_assessment"), "pass": None},
             "overall_compliance": "SKIP",
             "compliance_confidence": measurement_confidence
         }
     
-    # Determine font size threshold based on package size
-    if package_size_ml <= 500:
-        min_font_mm = 1.2
-        rule_label = "≤500 ml"
-    elif package_size_ml <= 3000:
-        min_font_mm = 1.4
-        rule_label = "500-3000 ml"
-    else:
-        min_font_mm = 1.8
-        rule_label = ">3000 ml"
+    # Validate each rule
+    rule_1 = _validate_font_size_rule(metrics.get("font_size_mm", 0), package_size_ml,
+                                      is_inner_packaging, measurement_confidence)
+    rule_2 = _validate_line_distance_rule(metrics.get("line_distance_mm", 0),
+                                          metrics.get("font_size_mm", 0))
+    rule_3 = _validate_contrast_rule(metrics)
     
-    font_mm = metrics.get("font_size_mm", 0)
-    line_mm = metrics.get("line_distance_mm", 0)
-    contrast = metrics.get("contrast_assessment", "").lower()
-    
-    # Rule 1: Font size
-    # EU Regulation 1272/2008 (CLP): Inner packaging ≤10ml can be smaller (exemption) but must remain easily legible
-    if is_inner_packaging and package_size_ml <= 10:
-        # Inner packaging exemption: font can be smaller, but must be measurable and legible
-        # No minimum threshold, but must be legible (Gemini should report measurement_confidence)
-        font_pass = font_mm > 0 and measurement_confidence >= 0.7  # Must be legible (0.7+ confidence)
-        font_status = "PASS" if font_pass else "UNCLEAR"
-        font_detail = f"{font_mm:.2f} mm (Inner packaging ≤10ml exemption - must remain easily legible. Legibility confidence: {measurement_confidence:.0%})"
-    else:
-        font_pass = font_mm >= min_font_mm
-        font_status = "PASS" if font_pass else "FAIL"
-        font_detail = f"{font_mm:.2f} mm ({rule_label} requires ≥{min_font_mm} mm)"
-    
-    # Rule 2: Line distance (≥120% of font size)
-    min_line_mm = font_mm * 1.2
-    line_pass = line_mm >= min_line_mm if line_mm > 0 else None
-    if line_pass is None:
-        line_status = "UNCLEAR"
-        line_detail = "Line distance not measurable"
-    else:
-        line_status = "PASS" if line_pass else "FAIL"
-        line_detail = f"{line_mm:.2f} mm (requires ≥{min_line_mm:.2f} mm = 120% of {font_mm:.2f} mm)"
-    
-    # Rule 3: Background & Text Color (High Contrast Required)
-    # EU Regulation 1272/2008 (CLP): CLP text MUST have high contrast
-    # - Primary: White background with Black text (classic CLP)
-    # - Secondary: Yellow background with Black text (valid for hazard pictograms, GHS color-coded)
-    # - Requirement: Must be high contrast (visual assessment)
-    bg_color = metrics.get('background_color', '').lower()
-    text_color = metrics.get('text_color', '').lower()
-    contrast_assess = metrics.get('contrast_assessment', 'medium').lower()
-    
-    # Valid combinations for CLP compliance
-    is_white_bg = any(word in bg_color for word in ['white', 'off-white', 'ivory', 'cream', 'light'])
-    is_yellow_bg = any(word in bg_color for word in ['yellow', 'gold', 'amber', 'orange-yellow', 'mustard'])
-    is_black_text = any(word in text_color for word in ['black', 'dark', 'dark gray', 'dark grey', 'charcoal'])
-    is_high_contrast = contrast_assess in ['high', 'very high', 'excellent']
-    
-    # Also accept: dark background + white/light text with high contrast
-    is_dark_bg = any(word in bg_color for word in ['dark', 'black', 'navy', 'purple', 'deep'])
-    is_white_text = any(word in text_color for word in ['white', 'light', 'cream', 'ivory'])
-    
-    # Accept: (White + Black) OR (Yellow + Black) OR (Dark bg + White text with high contrast)
-    contrast_pass = ((is_white_bg and is_black_text) or 
-                     (is_yellow_bg and is_black_text and is_high_contrast) or
-                     (is_dark_bg and is_white_text and is_high_contrast))
-    contrast_status = "PASS" if contrast_pass else "FAIL"
-    
-    if contrast_pass:
-        contrast_detail = f"High contrast confirmed: {metrics.get('background_color', 'unknown')} bg + {metrics.get('text_color', 'unknown')} text"
-    else:
-        contrast_detail = f"Insufficient contrast: {metrics.get('background_color', 'unknown')} bg + {metrics.get('text_color', 'unknown')} text (assessment: {contrast_assess})"
-    
-    overall_pass = font_pass and (line_pass if line_pass is not None else True) and contrast_pass
+    # Determine overall compliance
+    overall_pass = rule_1["pass"] and (rule_2["pass"] if rule_2["pass"] is not None else True) and rule_3["pass"]
     
     return {
-        "rule_1_font_size": {
-            "status": font_status,
-            "detail": font_detail,
-            "threshold_mm": min_font_mm,
-            "measured_mm": font_mm,
-            "pass": font_pass
-        },
-        "rule_2_line_distance": {
-            "status": line_status,
-            "detail": line_detail,
-            "threshold_mm": min_line_mm,
-            "measured_mm": line_mm,
-            "pass": line_pass
-        },
-        "rule_3_background_contrast": {
-            "status": contrast_status,
-            "detail": contrast_detail,
-            "measured": metrics.get("contrast_assessment"),
-            "pass": contrast_pass
-        },
+        "rule_1_font_size": rule_1,
+        "rule_2_line_distance": rule_2,
+        "rule_3_background_contrast": rule_3,
         "overall_compliance": "PASS" if overall_pass else "FAIL",
         "compliance_confidence": measurement_confidence
     }
+
+
+# ============================================================================
+# BIMODAL PAIR CLASSIFICATION HELPER
+# ============================================================================
+
+def _classify_bimodal_pair(lower_h: float, upper_h: float, lower_c: int, upper_c: int, 
+                           clp_threshold_mm: float = 0) -> str:
+    """Determine if bimodal pair is (x-height, cap-height) or (subscripts, caps).
+    
+    Returns: 'mixed-case' (lower peak is x-height) or 'all-caps' (upper peak is cap-height).
+    """
+    if clp_threshold_mm > 0:
+        # If lower_peak is very close to threshold → mixed-case (lower is x-height)
+        if abs(lower_h - clp_threshold_mm) < 0.05:
+            return 'mixed-case'
+        # If derived upper (via 0.85 ratio) near threshold → all-caps (upper is cap-height)
+        derived_x = upper_h * 0.85
+        if abs(derived_x - clp_threshold_mm) < 0.05:
+            return 'all-caps'
+    # Fallback: higher char count → that's the body text
+    return 'all-caps' if upper_c > lower_c else 'mixed-case'
 
 
 # ============================================================================
@@ -1051,10 +1105,12 @@ class ResponseCache:
         self.hits = 0
         self.misses = 0
 
-    def enable(self):
+    def enable(self) -> None:
+        """Enable response caching."""
         self._enabled = True
 
-    def disable(self):
+    def disable(self) -> None:
+        """Disable response caching (cache operations become no-ops)."""
         self._enabled = False
 
     # ------------------------------------------------------------------
@@ -1697,6 +1753,181 @@ If no clear number is visible, return 0."""
         else:
             logger.info(f"[SCALE] PDF appears to be at 1:1 scale")
     
+    def _extract_region_paths_from_page(self, page, rect_dict: Dict) -> List[Dict]:
+        """Extract all paths/lines within a page region."""
+        import fitz
+        pt_xmin = rect_dict['xmin']
+        pt_ymin = rect_dict['ymin']
+        pt_xmax = rect_dict['xmax']
+        pt_ymax = rect_dict['ymax']
+        
+        region_paths = []
+        drawings = page.get_drawings()
+        margin = 2  # pts
+        
+        for d in drawings:
+            r = d.get('rect')
+            if not r:
+                continue
+            if (r[0] >= pt_xmin - margin and r[2] <= pt_xmax + margin and
+                r[1] >= pt_ymin - margin and r[3] <= pt_ymax + margin):
+                w = r[2] - r[0]
+                h = r[3] - r[1]
+                if 0.3 < h < 20 and 0.1 < w < 30:  # Text-glyph-sized
+                    stroke_w = d.get('width', 0) or 0
+                    region_paths.append({
+                        'rect': r, 'w': w, 'h': h,
+                        'y_top': r[1], 'y_bot': r[3],
+                        'x': r[0], 'x_end': r[2],
+                        'y_center': (r[1] + r[3]) / 2,
+                        'stroke_w': stroke_w
+                    })
+        return region_paths
+
+    def _group_paths_into_lines(self, region_paths: List[Dict]) -> List[List[Dict]]:
+        """Group paths by y-coordinate into text lines."""
+        from collections import Counter
+        import statistics
+        
+        if not region_paths:
+            return []
+        
+        common_h = Counter(round(g['h'], 1) for g in region_paths).most_common(1)[0][0]
+        line_tolerance = max(0.8, common_h * 0.4)  # pts
+        
+        region_paths.sort(key=lambda g: g['y_center'])
+        text_lines = []
+        current_line = [region_paths[0]]
+        current_line_y_median = region_paths[0]['y_center']
+        
+        for g in region_paths[1:]:
+            if abs(g['y_center'] - current_line_y_median) < line_tolerance:
+                current_line.append(g)
+                current_line_y_median = sum(p['y_center'] for p in current_line) / len(current_line)
+            else:
+                if len(current_line) >= 3:
+                    text_lines.append(current_line)
+                current_line = [g]
+                current_line_y_median = g['y_center']
+        
+        if len(current_line) >= 3:
+            text_lines.append(current_line)
+        
+        return text_lines
+
+    def _compute_height_cluster(self, shapes: List[Dict]) -> float:
+        """Find dominant height from shape cluster."""
+        from collections import Counter
+        import statistics
+        
+        if not shapes:
+            return 0.0
+        
+        heights_mm = [(s['y_bot'] - s['y_top'] + s.get('stroke_w', 0)) * PT_TO_MM for s in shapes]
+        if not heights_mm:
+            return 0.0
+        return statistics.median(heights_mm)
+
+    def _cluster_heights_by_histogram(self, heights_mm: List[float], bin_width: float = 0.02) -> Dict[float, int]:
+        """Bin heights, return height→count dict."""
+        from collections import Counter
+        import statistics
+        
+        height_bins = Counter(round(h, 2) for h in heights_mm)
+        
+        # Merge nearby bins using adaptive tolerance
+        sorted_heights = sorted(height_bins.keys())
+        clusters = []  # list of [center, total_count, [member_heights]]
+        
+        for h in sorted_heights:
+            count = height_bins[h]
+            merged = False
+            for cluster in clusters:
+                if abs(h - cluster[0]) <= 0.05:
+                    cluster[1] += count
+                    cluster[2].extend([h] * count)
+                    merged = True
+                    break
+            if not merged:
+                clusters.append([h, count, [h] * count])
+        
+        # If too many clusters, relax tolerance
+        if len(clusters) > 8:
+            clusters = []
+            for h in sorted_heights:
+                count = height_bins[h]
+                merged = False
+                for cluster in clusters:
+                    if abs(h - cluster[0]) <= 0.08:
+                        cluster[1] += count
+                        cluster[2].extend([h] * count)
+                        merged = True
+                        break
+                if not merged:
+                    clusters.append([h, count, [h] * count])
+        
+        # Recalculate centers as MEDIAN
+        for cluster in clusters:
+            cluster[0] = statistics.median(cluster[2])
+        
+        # Return as dict: height_mm -> count
+        return {round(c[0], 3): c[1] for c in clusters if c[1] >= 3}
+
+    def _compute_pdf_scale(self, page, use_cache: bool = True, manual_scale: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+        """Handle CACHE/MANUAL/AUTO scale modes. Returns (vertical_scale, horizontal_scale)."""
+        import fitz
+        
+        vertical_scale = 1.0
+        horizontal_scale = 1.0
+        
+        # Use cached scale if available
+        if use_cache and hasattr(self, '_pdf_scale_cache'):
+            logger.info(f"[SCALE] Using cached scale")
+            return vertical_scale, horizontal_scale
+        
+        # Manual mode: use provided dimensions
+        if manual_scale:
+            vertical_scale, horizontal_scale = manual_scale
+            logger.info(f"[SCALE] Using manual scale: v={vertical_scale:.4f}, h={horizontal_scale:.4f}")
+            return vertical_scale, horizontal_scale
+        
+        # Auto mode: disabled (unreliable per MEMORY.md)
+        logger.info(f"[SCALE] No scale correction (1:1 mode)")
+        return 1.0, 1.0
+
+    def _measure_body_text_gaps(self, body_line_indices: set, line_y_centers_mm: List[float], 
+                                 font_size_mm: float) -> Tuple[float, float]:
+        """Measure center-to-center and gap from lines. Returns (center_to_center_mm, gap_mm)."""
+        import statistics
+        
+        body_text_line_ys = sorted([line_y_centers_mm[i] for i in body_line_indices])
+        
+        if len(body_text_line_ys) < 2:
+            return 0.0, 0.0
+        
+        spacings = [body_text_line_ys[i+1] - body_text_line_ys[i] for i in range(len(body_text_line_ys) - 1)]
+        
+        # Filter using IQR on physically-plausible spacings
+        sorted_spacings = sorted(spacings)
+        n = len(sorted_spacings)
+        if n >= 4:
+            q1 = sorted_spacings[n // 4]
+            q3 = sorted_spacings[3 * n // 4]
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * max(iqr, 0.3)
+            upper_bound = q3 + 1.5 * max(iqr, 0.3)
+            filtered_spacings = [s for s in spacings if lower_bound <= s <= upper_bound]
+        else:
+            filtered_spacings = spacings
+        
+        if not filtered_spacings:
+            filtered_spacings = spacings
+        
+        center_to_center_mm = statistics.median(filtered_spacings)
+        gap_mm = max(0, center_to_center_mm - font_size_mm)
+        
+        return center_to_center_mm, gap_mm
+    
     def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict, clp_threshold_mm: float = 0.0) -> Optional[Dict]:
         """
         Measure font size directly from PDF vector paths (100% deterministic).
@@ -2200,8 +2431,6 @@ If no clear number is visible, return 0."""
             # Build histogram of body char heights (0.02mm bins)
             height_bins = Counter(round(h, 2) for h in body_char_heights)
             
-            # DEBUG: Show raw histogram (top 10 bins)
-            logger.info(f"[DEBUG] DEBUG: Height histogram (top 10):")
             for h, c in height_bins.most_common(10):
                 logger.info(f"       {h:.2f}mm: {c} chars")
             
@@ -2244,8 +2473,6 @@ If no clear number is visible, return 0."""
             for cluster in clusters:
                 cluster[0] = statistics.median(cluster[2])
             
-            # DEBUG: Show clusters after merging
-            logger.info(f"[DEBUG] DEBUG: Clusters after merging:")
             for i, (center, count, members) in enumerate(clusters):
                 unique_members = sorted(set(members))
                 logger.info(f"       Cluster {i+1}: center={center:.3f}mm, count={count}, range={min(unique_members):.2f}-{max(unique_members):.2f}mm")
@@ -2256,8 +2483,6 @@ If no clear number is visible, return 0."""
             # Sort peaks by count (most common first)
             peaks.sort(key=lambda x: -x[1])
             
-            # DEBUG: Show final peaks
-            logger.info(f"[DEBUG] DEBUG: Final peaks (sorted by count):")
             for i, (h, c) in enumerate(peaks[:5]):
                 logger.info(f"       Peak {i+1}: {h:.3f}mm, {c} chars")
             
@@ -3293,7 +3518,6 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             # Get actual cropped image dimensions for logging
             cropped_w, cropped_h = cropped_image.width, cropped_image.height
             
-            # DEBUG: Log all values for troubleshooting
             measurement_method = measurements.get('measurement_method', 'x-height')
             logger.info(f"✓ Gemini measurements (X-HEIGHT OPTIMIZED):")
             logger.info(f"    [CALIBRATION] DPI={self.calibration.true_dpi}, dpmm={self.calibration.dpmm:.4f}, calibrated={self.calibration.is_calibrated}")
