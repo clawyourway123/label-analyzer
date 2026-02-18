@@ -1098,16 +1098,19 @@ If you cannot find a size declaration, return value_in_ml=null with low confiden
             logger.info(f"  ✓ Detected package size: {result.get('value')} {result.get('unit')} = {int(value_ml)}ml (confidence: {confidence:.0%})")
             return int(value_ml), confidence
         else:
-            logger.warning(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using default 500ml — font size thresholds may be inaccurate")
-            return 500, 0.0  # Default fallback
+            # SAFE FALLBACK: Use 5000ml (strictest threshold: 1.8mm) when detection fails.
+            # This avoids false passes — if font meets 1.8mm threshold, it meets all thresholds.
+            # Previously defaulted to 500ml (1.2mm) which caused false passes on larger containers.
+            logger.warning(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using SAFE default 5000ml (strictest threshold) — font size thresholds may be conservative")
+            return 5000, 0.0  # Safe fallback — strictest threshold
             
     except (APIError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Package size detection failed ({type(e).__name__}: {e}), using default 500ml")
-        return 500, 0.0
+        logger.warning(f"Package size detection failed ({type(e).__name__}: {e}), using safe default 5000ml")
+        return 5000, 0.0
     except Exception as e:
         logger.error(f"Unexpected error in package size detection: {type(e).__name__}: {e}")
-        logger.warning("Using default 500ml package size (fallback)")
-        return 500, 0.0
+        logger.warning("Using safe default 5000ml package size (fallback)")
+        return 5000, 0.0
 
 
 # ============================================================================
@@ -1374,7 +1377,7 @@ class LabelAnalyzer:
         self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
         self._gemini_scale_factor: float = 1.0  # Track coordinate scaling
-        self.package_size_ml: int = package_size_ml or 500  # Default fallback
+        self.package_size_ml: int = package_size_ml or 5000  # Safe default (strictest threshold)
         self._image_cache: Dict[str, str] = {}  # Cache preprocessed images by hash
         self._reference_dimensions: List[Dict] = []  # For PDF scale detection
         self.package_size_confidence: float = 0.0  # Confidence in detected size
@@ -2130,103 +2133,88 @@ If no clear number is visible, return 0."""
                 logger.info(f"  📐 Using TEXT-BASED x-height: {xheight_mm:.3f}mm (most reliable)")
             elif len(peaks) >= 2:
                 # Two or more peaks detected = potential bimodal distribution (mixed case)
-                # IMPROVED ALGORITHM:
-                # 1. If CLP threshold is known, prefer peaks near it (±0.15mm) over most frequent
-                # 2. Otherwise, most frequent cluster = x-height (body text is most common)
-                # 3. Find the next most frequent cluster with >0.25mm separation = cap-height
-                # 4. Avoid edge cases (noise) by requiring >50 chars and reasonable height (0.8-3.0mm)
+                # ALGORITHM (THRESHOLD-INDEPENDENT):
+                # 1. Sort peaks by height (ascending) to find structural x-height vs cap-height
+                # 2. Most frequent peak = x-height (body text dominates)
+                # 3. Find bimodal split using distribution shape ONLY
+                # 4. If two prominent peaks exist with separation > 0.25mm and ratio
+                #    between them is 0.65-0.85, treat as x-height/cap-height pair
+                # 5. The SMALLER of the two prominent peaks = x-height
+                #
+                # NOTE: clp_threshold_mm is intentionally IGNORED here to avoid
+                # circular logic where the threshold determines the measurement.
                 
                 # Sort peaks by character count (descending)
                 peaks_by_count = sorted(peaks, key=lambda x: -x[1])
                 
-                # CLP-THRESHOLD-AWARE PEAK SELECTION
-                # When a CLP threshold is provided, prefer a peak near that threshold
-                # over the raw most-frequent peak. This handles labels where the CLP
-                # hazard text and other body text coexist in the same region, and the
-                # non-CLP text happens to have more glyphs.
-                if clp_threshold_mm > 0:
-                    # Find peaks within ±0.15mm of the CLP threshold
-                    # AND with at least 20% of the top peak's count (not just noise)
-                    top_count = peaks_by_count[0][1]
-                    clp_candidates = [
-                        (h, c) for h, c in peaks_by_count
-                        if abs(h - clp_threshold_mm) <= 0.15 and c >= top_count * 0.2
-                    ]
-                    if clp_candidates:
-                        # Pick the candidate closest to the threshold
-                        best_clp = min(clp_candidates, key=lambda p: abs(p[0] - clp_threshold_mm))
-                        xheight_mm = best_clp[0]
-                        xheight_count = best_clp[1]
-                        logger.info(f"  📐 CLP-threshold-aware selection: picked {xheight_mm:.3f}mm ({xheight_count} chars) near threshold {clp_threshold_mm}mm")
-                        logger.info(f"     (Most frequent was {peaks_by_count[0][0]:.3f}mm with {peaks_by_count[0][1]} chars)")
-                    else:
-                        # No peak directly near threshold — try cap-height derivation
-                        # If text is all-caps, a peak above the threshold may be cap-height.
-                        # x-height = cap-height * ratio (typically 0.70-0.85 for sans-serif).
-                        # Try multiple ratios to find a cap-height peak whose derived
-                        # x-height lands near the CLP threshold.
-                        cap_derived = False
-                        # Collect ALL valid (ratio, peak, distance) combos, then pick best
-                        all_cap_options = []
-                        for ratio in [0.85, 0.82, 0.80, 0.78, 0.75, 0.72, 0.70]:
-                            cap_candidates = [
-                                (h, c) for h, c in peaks_by_count
-                                if h > clp_threshold_mm and abs(h * ratio - clp_threshold_mm) <= 0.10
-                                and c >= top_count * 0.15
-                            ]
-                            for h, c in cap_candidates:
-                                dist = abs(h * ratio - clp_threshold_mm)
-                                all_cap_options.append((dist, c, h, ratio))
-                        
-                        if all_cap_options:
-                            # Pick option closest to threshold; break ties by count
-                            all_cap_options.sort(key=lambda x: (x[0], -x[1]))
-                            best_dist, best_count, best_h, best_ratio = all_cap_options[0]
-                            xheight_mm = best_h * best_ratio
-                            xheight_count = best_count
-                            capheight_mm = best_h
-                            measurement_approach = 'cap-derived-xheight'
-                            cap_derived = True
-                            logger.info(f"  📐 Cap-height derived x-height: cap={best_h:.3f}mm * {best_ratio} = x-height={xheight_mm:.3f}mm ({xheight_count} chars)")
-                            logger.info(f"     (CLP threshold={clp_threshold_mm}mm, best of {len(all_cap_options)} options, dist={best_dist:.4f}mm)")
-                        
-                        if not cap_derived:
-                            # Final fallback: most frequent peak
-                            xheight_mm = peaks_by_count[0][0]
-                            xheight_count = peaks_by_count[0][1]
-                            logger.info(f"  📐 No peak near CLP threshold {clp_threshold_mm}mm, using most frequent: {xheight_mm:.3f}mm ({xheight_count} chars)")
-                else:
-                    # No threshold provided — use most frequent cluster as x-height
+                # THRESHOLD-INDEPENDENT BIMODAL DETECTION
+                # Step 1: Find the two most prominent peaks (by count, with minimum significance)
+                top_count = peaks_by_count[0][1]
+                significant_peaks = [
+                    (h, c) for h, c in peaks_by_count
+                    if c >= top_count * 0.15 and 0.5 < h < 4.0  # Filter noise
+                ]
+                
+                # Step 2: Look for bimodal pair among significant peaks
+                # A bimodal pair has: separation > 0.25mm, height ratio 0.60-0.88
+                bimodal_found = False
+                if len(significant_peaks) >= 2:
+                    # Sort significant peaks by height
+                    sig_by_height = sorted(significant_peaks, key=lambda x: x[0])
+                    
+                    # Try all pairs, prefer the pair with highest combined count
+                    best_pair = None
+                    best_pair_count = 0
+                    for i in range(len(sig_by_height)):
+                        for j in range(i + 1, len(sig_by_height)):
+                            lo_h, lo_c = sig_by_height[i]
+                            hi_h, hi_c = sig_by_height[j]
+                            separation = hi_h - lo_h
+                            ratio = lo_h / hi_h if hi_h > 0 else 0
+                            combined = lo_c + hi_c
+                            # Valid bimodal: good separation, plausible cap-to-x ratio
+                            if separation > 0.25 and 0.60 <= ratio <= 0.88 and combined > best_pair_count:
+                                best_pair = (lo_h, lo_c, hi_h, hi_c, ratio)
+                                best_pair_count = combined
+                    
+                    if best_pair:
+                        lo_h, lo_c, hi_h, hi_c, ratio = best_pair
+                        xheight_mm = lo_h
+                        xheight_count = lo_c
+                        capheight_mm = hi_h
+                        measurement_approach = 'bimodal-xheight'
+                        bimodal_found = True
+                        logger.info(f"  📐 Bimodal distribution detected (threshold-independent):")
+                        logger.info(f"     x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({hi_c} chars)")
+                        logger.info(f"     ratio={ratio:.3f}, separation={hi_h - lo_h:.3f}mm")
+                
+                if not bimodal_found:
+                    # No bimodal pair found — use most frequent peak as x-height
                     xheight_mm = peaks_by_count[0][0]
                     xheight_count = peaks_by_count[0][1]
-                
-                # Find best cap-height candidate (skip if already derived from cap)
-                if measurement_approach != 'cap-derived-xheight':
+                    
+                    # Still try to find a cap-height for reporting
                     best_capheight_h = None
                     best_capheight_c = 0
-                    best_separation = 0.0
-                    
                     for h, c in peaks_by_count[1:]:
                         separation = abs(h - xheight_mm)
-                        # Good separation + reasonable frequency + plausible height
-                        if separation > 0.25 and c > 50 and 0.8 < h < 3.0:
-                            # Prefer the most frequent among valid candidates
+                        if separation > 0.25 and c > 50 and 0.5 < h < 4.0:
                             if c > best_capheight_c:
                                 best_capheight_h = h
                                 best_capheight_c = c
-                                best_separation = separation
                     
                     if best_capheight_h is not None:
-                        # Found a clear bimodal split
                         capheight_mm = best_capheight_h
                         measurement_approach = 'bimodal-xheight'
-                        logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars), separation={best_separation:.3f}mm")
+                        logger.info(f"  📐 Bimodal (most-frequent): x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars)")
                     else:
-                        # No valid cap-height found — treat as single peak
                         capheight_mm = xheight_mm
                         measurement_approach = 'single-peak'
-                        logger.info(f"  📐 Only one significant cluster detected: {xheight_mm:.3f}mm ({xheight_count} chars), treating as single peak (all lowercase or monotype)")
+                        logger.info(f"  📐 Only one significant cluster: {xheight_mm:.3f}mm ({xheight_count} chars)")
                         logger.info(f"  📐 Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
+                
+                if clp_threshold_mm > 0:
+                    logger.info(f"  📐 CLP threshold={clp_threshold_mm}mm (used for compliance check only, NOT for peak selection)")
             
             if measurement_approach == 'single-peak' and len(peaks) == 1:
                 # Single peak — could be all-caps OR all-lowercase
@@ -3291,7 +3279,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             self.calibrate_dpi(image, image_data)
         
         # Stage 0b: Detect package size (if not provided)
-        if self.package_size_ml == 500 and self.package_size_confidence == 0.0:
+        if self.package_size_ml == 5000 and self.package_size_confidence == 0.0:
             # Only auto-detect if using default (not explicitly provided)
             pkg_size, pkg_conf = detect_package_size(image_data, self.gemini, image.width, image.height)
             self.package_size_ml = pkg_size
