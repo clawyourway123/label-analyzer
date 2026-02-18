@@ -1683,13 +1683,14 @@ If no clear number is visible, return 0."""
                     self._pdf_scale_cache = {}
                 self._pdf_scale_cache[pdf_path] = (vertical_scale, horizontal_scale)
             else:
-                # AUTO MODE: Find dimension lines and OCR their labels via Gemini
-                try:
-                    self._auto_detect_pdf_scale(page, pdf_path)
-                    if hasattr(self, '_pdf_scale_cache') and pdf_path in self._pdf_scale_cache:
-                        vertical_scale, horizontal_scale = self._pdf_scale_cache[pdf_path]
-                except Exception as e:
-                    logger.warning(f"  ⚠️ Auto scale detection failed: {e}")
+                # AUTO MODE DISABLED: Gemini OCR of dimension line labels is unreliable
+                # and causes measurement variance (see MEMORY.md: "Unstable DPI Calibration").
+                # PDF vectors are in absolute PDF points (1/72 inch) — no scale correction needed.
+                # If a PDF IS drawn at non-1:1 scale, use manual _reference_dimensions instead.
+                logger.info(f"  📏 No manual reference dimensions — using raw PDF points (1:1 scale)")
+                if not hasattr(self, '_pdf_scale_cache'):
+                    self._pdf_scale_cache = {}
+                self._pdf_scale_cache[pdf_path] = (1.0, 1.0)
             
             if vertical_scale != 1.0 or horizontal_scale != 1.0:
                 logger.info(f"  📏 Scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
@@ -2159,41 +2160,66 @@ If no clear number is visible, return 0."""
                         logger.info(f"  📐 CLP-threshold-aware selection: picked {xheight_mm:.3f}mm ({xheight_count} chars) near threshold {clp_threshold_mm}mm")
                         logger.info(f"     (Most frequent was {peaks_by_count[0][0]:.3f}mm with {peaks_by_count[0][1]} chars)")
                     else:
-                        # No peak near threshold — fall back to most frequent
-                        xheight_mm = peaks_by_count[0][0]
-                        xheight_count = peaks_by_count[0][1]
-                        logger.info(f"  📐 No peak near CLP threshold {clp_threshold_mm}mm, using most frequent: {xheight_mm:.3f}mm ({xheight_count} chars)")
+                        # No peak directly near threshold — try cap-height derivation
+                        # If text is all-caps, a peak above the threshold may be cap-height.
+                        # x-height = cap-height * ratio (typically 0.70-0.85 for sans-serif).
+                        # Try multiple ratios to find a cap-height peak whose derived
+                        # x-height lands near the CLP threshold.
+                        cap_derived = False
+                        for ratio in [0.85, 0.82, 0.80, 0.78, 0.75, 0.72, 0.70]:
+                            cap_candidates = [
+                                (h, c) for h, c in peaks_by_count
+                                if h > clp_threshold_mm and abs(h * ratio - clp_threshold_mm) <= 0.10
+                                and c >= top_count * 0.15
+                            ]
+                            if cap_candidates:
+                                best_cap = max(cap_candidates, key=lambda p: p[1])
+                                xheight_mm = best_cap[0] * ratio
+                                xheight_count = best_cap[1]
+                                capheight_mm = best_cap[0]
+                                measurement_approach = 'cap-derived-xheight'
+                                cap_derived = True
+                                logger.info(f"  📐 Cap-height derived x-height: cap={best_cap[0]:.3f}mm * {ratio} = x-height={xheight_mm:.3f}mm ({xheight_count} chars)")
+                                logger.info(f"     (CLP threshold={clp_threshold_mm}mm, no direct peak match)")
+                                break
+                        
+                        if not cap_derived:
+                            # Final fallback: most frequent peak
+                            xheight_mm = peaks_by_count[0][0]
+                            xheight_count = peaks_by_count[0][1]
+                            logger.info(f"  📐 No peak near CLP threshold {clp_threshold_mm}mm, using most frequent: {xheight_mm:.3f}mm ({xheight_count} chars)")
                 else:
                     # No threshold provided — use most frequent cluster as x-height
                     xheight_mm = peaks_by_count[0][0]
                     xheight_count = peaks_by_count[0][1]
                 
-                # Find best cap-height candidate
-                best_capheight_h = None
-                best_capheight_c = 0
-                best_separation = 0.0
-                
-                for h, c in peaks_by_count[1:]:
-                    separation = abs(h - xheight_mm)
-                    # Good separation + reasonable frequency + plausible height
-                    if separation > 0.25 and c > 50 and 0.8 < h < 3.0:
-                        # Prefer the most frequent among valid candidates
-                        if c > best_capheight_c:
-                            best_capheight_h = h
-                            best_capheight_c = c
-                            best_separation = separation
-                
-                if best_capheight_h is not None:
-                    # Found a clear bimodal split
-                    capheight_mm = best_capheight_h
-                    measurement_approach = 'bimodal-xheight'
-                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars), separation={best_separation:.3f}mm")
-                else:
-                    # No valid cap-height found — treat as single peak
-                    capheight_mm = xheight_mm
-                    measurement_approach = 'single-peak'
-                    logger.info(f"  📐 Only one significant cluster detected: {xheight_mm:.3f}mm ({xheight_count} chars), treating as single peak (all lowercase or monotype)")
-                    logger.info(f"  📐 Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
+                # Find best cap-height candidate (skip if already derived from cap)
+                if measurement_approach != 'cap-derived-xheight':
+                    best_capheight_h = None
+                    best_capheight_c = 0
+                    best_separation = 0.0
+                    
+                    for h, c in peaks_by_count[1:]:
+                        separation = abs(h - xheight_mm)
+                        # Good separation + reasonable frequency + plausible height
+                        if separation > 0.25 and c > 50 and 0.8 < h < 3.0:
+                            # Prefer the most frequent among valid candidates
+                            if c > best_capheight_c:
+                                best_capheight_h = h
+                                best_capheight_c = c
+                                best_separation = separation
+                    
+                    if best_capheight_h is not None:
+                        # Found a clear bimodal split
+                        capheight_mm = best_capheight_h
+                        measurement_approach = 'bimodal-xheight'
+                        logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars), separation={best_separation:.3f}mm")
+                    else:
+                        # No valid cap-height found — treat as single peak
+                        capheight_mm = xheight_mm
+                        measurement_approach = 'single-peak'
+                        logger.info(f"  📐 Only one significant cluster detected: {xheight_mm:.3f}mm ({xheight_count} chars), treating as single peak (all lowercase or monotype)")
+                        logger.info(f"  📐 Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
             
             if measurement_approach == 'single-peak' and len(peaks) == 1:
                 # Single peak — could be all-caps OR all-lowercase
