@@ -376,24 +376,89 @@ class MeasurementLine(BaseModel):
 
 
 class CalibrationResult:
-    """DPI calibration result"""
-    def __init__(self, original_dpi: int):
+    """DPI calibration result with persistent disk-based caching"""
+    def __init__(self, original_dpi: int, cache_dir: Optional[str] = None):
         self.original_dpi = original_dpi
         self.true_dpi = original_dpi
         self.dpmm = original_dpi / 25.4
         self.measurement_line: Optional[MeasurementLine] = None
         self.is_calibrated = False
-        # Cache: map reference value (mm) → DPI for consistency
-        # If Gemini finds the same reference again (diff pixel coords), reuse same DPI
+        self.locked_dpi: Optional[int] = None  # Once locked, never recalibrate
+        
+        # In-memory cache: map reference value (mm) → DPI
         self.reference_dpi_cache = {}
+        
+        # Disk cache: map PDF hash → calibrated DPI
+        # Format: ~/.cache/label_analyzer/dpi_cache.json
+        # { "pdf_sha256_hash": 334, ... }
+        self.disk_cache_path = None
+        self.disk_cache = {}
+        if cache_dir:
+            cache_dir_path = Path(cache_dir) / "dpi_cache.json"
+            self.disk_cache_path = cache_dir_path
+            try:
+                if cache_dir_path.exists():
+                    with open(cache_dir_path, 'r') as f:
+                        self.disk_cache = json.load(f)
+                        logger.info(f"  💾 Loaded DPI cache with {len(self.disk_cache)} entries")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Failed to load DPI cache: {e}")
+                self.disk_cache = {}
+    
+    def lookup_cached_dpi(self, pdf_hash: str) -> Optional[int]:
+        """Look up cached DPI for a PDF by its SHA256 hash.
+        
+        Args:
+            pdf_hash: SHA256 hash of PDF file
+            
+        Returns:
+            Cached DPI if found, None otherwise
+        """
+        if pdf_hash in self.disk_cache:
+            cached_dpi = self.disk_cache[pdf_hash]
+            logger.info(f"  🔒 DPI locked (cached): {cached_dpi} DPI")
+            self.locked_dpi = cached_dpi
+            self.true_dpi = cached_dpi
+            self.dpmm = cached_dpi / 25.4
+            self.is_calibrated = True
+            return cached_dpi
+        return None
+    
+    def cache_dpi_for_pdf(self, pdf_hash: str, dpi: int) -> bool:
+        """Store calibrated DPI in disk cache.
+        
+        Args:
+            pdf_hash: SHA256 hash of PDF file
+            dpi: Calibrated DPI value
+            
+        Returns:
+            True if cached successfully
+        """
+        self.disk_cache[pdf_hash] = dpi
+        if self.disk_cache_path:
+            try:
+                self.disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.disk_cache_path, 'w') as f:
+                    json.dump(self.disk_cache, f, indent=2)
+                logger.info(f"  💾 Saved DPI to cache: {pdf_hash[:8]}... → {dpi} DPI")
+                return True
+            except Exception as e:
+                logger.warning(f"  ⚠️ Failed to save DPI cache: {e}")
+        return False
     
     def update(self, line: MeasurementLine):
         """Update DPI based on measurement line
         
-        CRITICAL: If we've seen this reference value (mm) before, reuse the DPI.
+        CRITICAL: If DPI is locked, skip recalibration.
+        If we've seen this reference value (mm) before, reuse the DPI.
         This prevents different pixel measurements of the same reference from causing
         DPI to vary wildly (336 → 247 → 209 for the same 636.07mm reference).
         """
+        # If DPI is locked, don't recalibrate
+        if self.locked_dpi is not None:
+            logger.info(f"  🔒 DPI locked at {self.locked_dpi}, skipping recalibration")
+            return True
+        
         px_length = ((line.end_point.x - line.start_point.x)**2 + 
                      (line.end_point.y - line.start_point.y)**2)**0.5
         
@@ -418,11 +483,15 @@ class CalibrationResult:
             # Cache it
             self.reference_dpi_cache[ref_key] = calculated_dpi
             
+            # Lock DPI after first successful calibration
+            self.locked_dpi = calculated_dpi
+            
             self.true_dpi = calculated_dpi
             self.dpmm = calculated_dpmm
             self.measurement_line = line
             self.is_calibrated = True
-            logger.info(f"Calibrated DPI: {self.true_dpi} DPI ({self.dpmm:.2f} px/mm) [reference: {line.value_mm}mm]")
+            logger.info(f"  Calibrated DPI: {self.true_dpi} DPI ({self.dpmm:.2f} px/mm) [reference: {line.value_mm}mm]")
+            logger.info(f"  🔒 Locking DPI at {self.true_dpi} for this PDF")
             return True
         return False
 
@@ -1299,7 +1368,8 @@ class LabelAnalyzer:
             cache.disable()
         self.gemini = GeminiClient(project_id, cache=cache)
         self.original_dpi = dpi
-        self.calibration = CalibrationResult(dpi)
+        # Pass cache_dir to CalibrationResult for DPI disk caching
+        self.calibration = CalibrationResult(dpi, cache_dir=cache_dir)
         self.detected_parts: List[DetectedPart] = []
         self.ensemble_scorer = EnsembleConfidence(weights=confidence_weights)
         self._image_size: Tuple[int, int] = (0, 0)  # (width, height)
@@ -2249,10 +2319,17 @@ If no clear number is visible, return 0."""
             self.calibration.true_dpi = true_dpi
             self.calibration.dpmm = true_dpi / 25.4
             self.calibration.is_calibrated = True
+            self.calibration.locked_dpi = true_dpi  # Lock DPI after calibration
             
             logger.info(f"  ✓ PDF vector calibration: {len(horiz_lines)} lines found, reference={physical_mm:.2f}mm")
             logger.info(f"  ✓ Scale ratio: {scale_ratio:.4f} (1.0 = PDF is 1:1 physical)")
             logger.info(f"  ✓ Calibrated DPI: {true_dpi} DPI ({self.calibration.dpmm:.2f} px/mm)")
+            logger.info(f"  🔒 Locking DPI at {true_dpi}")
+            
+            # Cache this DPI for future runs of the same PDF
+            if hasattr(self, '_pdf_hash') and self._pdf_hash:
+                self.calibration.cache_dpi_for_pdf(self._pdf_hash, true_dpi)
+            
             doc.close()
             return True
             
@@ -3062,10 +3139,25 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
 
         # Stage 0a: Calibrate DPI (skip for PDFs — vector measurement in Stage 3 is exact)
         if hasattr(self, '_pdf_path') and self._pdf_path:
-            logger.info("Stage 0: Skipping DPI calibration (PDF vector measurement will be used in Stage 3)")
-            self.calibration.true_dpi = self.original_dpi
-            self.calibration.dpmm = self.original_dpi / 25.4
-            self.calibration.is_calibrated = True
+            logger.info("Stage 0: DPI Calibration (PDF)")
+            
+            # Try to load cached DPI for this PDF
+            try:
+                with open(self._pdf_path, 'rb') as f:
+                    pdf_hash = hashlib.sha256(f.read()).hexdigest()
+                cached_dpi = self.calibration.lookup_cached_dpi(pdf_hash)
+                if cached_dpi:
+                    logger.info(f"  ✓ Using cached DPI: {cached_dpi} DPI")
+                    self.calibration.true_dpi = cached_dpi
+                    self.calibration.dpmm = cached_dpi / 25.4
+                    self.calibration.is_calibrated = True
+                    self._pdf_hash = pdf_hash  # Store for later caching
+                else:
+                    logger.info(f"  📝 No cached DPI found, will calibrate during vector measurement")
+                    self._pdf_hash = pdf_hash  # Store for later caching
+            except Exception as e:
+                logger.warning(f"  ⚠️ Failed to compute PDF hash: {e}")
+                self._pdf_hash = None
         else:
             self.calibrate_dpi(image, image_data)
         
