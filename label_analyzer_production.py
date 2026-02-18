@@ -33,6 +33,16 @@ import fitz  # PyMuPDF
 from PIL import Image as PIL_Image, ImageDraw as PIL_ImageDraw
 from pydantic import BaseModel, Field
 
+# ============================================================================
+# PYMUPDF GLYPH HEIGHT CORRECTION
+# ============================================================================
+# PyMuPDF's default glyph bbox includes 10-37% padding above/below visible
+# characters (font design metrics). Setting this flag returns VISIBLE heights
+# only, matching CLP measurement requirements. This must be set BEFORE any
+# PyMuPDF operations to take effect.
+# Ref: https://github.com/pymupdf/PyMuPDF/discussions/3067
+fitz.TOOLS.set_small_glyph_heights(True)
+
 
 # ============================================================================
 # LOGGING SETUP
@@ -2015,26 +2025,45 @@ If no clear number is visible, return 0."""
                 measurement_approach = 'text-rawdict-xheight'
                 logger.info(f"  📐 Using TEXT-BASED x-height: {xheight_mm:.3f}mm (most reliable)")
             elif len(peaks) >= 2:
-                # Two peaks detected = bimodal distribution (mixed case)
-                # Smaller peak = x-height, larger peak = cap-height
-                p1_h, p1_count = peaks[0]
-                p2_h, p2_count = peaks[1]
+                # Two or more peaks detected = potential bimodal distribution (mixed case)
+                # IMPROVED ALGORITHM:
+                # 1. Most frequent cluster = x-height (body text is most common)
+                # 2. Find the next most frequent cluster with >0.25mm separation = cap-height
+                # 3. Avoid edge cases (noise) by requiring >50 chars and reasonable height (0.8-3.0mm)
                 
-                # Sort by height (not count) to identify which is x-height vs cap-height
-                short_peak, tall_peak = sorted([p1_h, p2_h])
+                # Sort peaks by character count (descending)
+                peaks_by_count = sorted(peaks, key=lambda x: -x[1])
                 
-                # Sanity check: peaks should be reasonably separated (>0.2mm)
-                # Lowered from 0.3mm — CLP fonts can have tighter cap/x ratios
-                if tall_peak - short_peak > 0.2:
-                    xheight_mm = short_peak
-                    capheight_mm = tall_peak
+                # Use most frequent cluster as x-height
+                xheight_mm = peaks_by_count[0][0]
+                xheight_count = peaks_by_count[0][1]
+                
+                # Find best cap-height candidate
+                best_capheight_h = None
+                best_capheight_c = 0
+                best_separation = 0.0
+                
+                for h, c in peaks_by_count[1:]:
+                    separation = abs(h - xheight_mm)
+                    # Good separation + reasonable frequency + plausible height
+                    if separation > 0.25 and c > 50 and 0.8 < h < 3.0:
+                        # Prefer the most frequent among valid candidates
+                        if c > best_capheight_c:
+                            best_capheight_h = h
+                            best_capheight_c = c
+                            best_separation = separation
+                
+                if best_capheight_h is not None:
+                    # Found a clear bimodal split
+                    capheight_mm = best_capheight_h
                     measurement_approach = 'bimodal-xheight'
-                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm, cap-height={capheight_mm:.3f}mm, separation={tall_peak-short_peak:.3f}mm")
+                    logger.info(f"  📐 Bimodal distribution detected: x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars), separation={best_separation:.3f}mm")
                 else:
-                    # Peaks too close, likely noise — fall back to single peak
-                    xheight_mm = peaks[0][0]
-                    capheight_mm = peaks[0][0]
-                    logger.info(f"  📐 Peaks too close ({tall_peak - short_peak:.2f}mm), treating as single peak: {xheight_mm:.3f}mm")
+                    # No valid cap-height found — treat as single peak
+                    capheight_mm = xheight_mm
+                    measurement_approach = 'single-peak'
+                    logger.info(f"  📐 Only one significant cluster detected: {xheight_mm:.3f}mm ({xheight_count} chars), treating as single peak (all lowercase or monotype)")
+                    logger.info(f"  📐 Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
             
             if measurement_approach == 'single-peak' and len(peaks) == 1:
                 # Single peak — could be all-caps OR all-lowercase
