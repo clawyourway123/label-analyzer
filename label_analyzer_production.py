@@ -2033,6 +2033,44 @@ If no clear number is visible, return 0."""
                         logger.warning(f"  ⚠️  Glyph-based measurement failed for font: {glyph_err}")
                         logger.warning(f"     Falling back to origin-based measurement (less accurate)")
                     
+                elif len(cap_pts) >= 3:
+                    # ALL-CAPS TEXT: No lowercase x-height chars, but we have cap-height
+                    # Derive x-height from cap-height using typical ratio
+                    text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
+                    
+                    # Try glyph-based x-height from embedded font metrics (gold standard)
+                    glyph_derived = False
+                    try:
+                        if body_spans:
+                            sample_span = body_spans[0]
+                            font_name = sample_span.get('font', '')
+                            font_size_pt = sample_span.get('size', 0)
+                            fonts_on_page = page2.get_fonts(full=True)
+                            font_xref = None
+                            for f in fonts_on_page:
+                                if len(f) >= 5 and (f[3] == font_name or f[4] == font_name):
+                                    font_xref = f[0]
+                                    break
+                            if font_xref:
+                                font_data = doc2.extract_font(font_xref)
+                                if font_data and len(font_data) >= 4 and font_data[3]:
+                                    font_obj = fitz.Font(fontbuffer=font_data[3])
+                                    x_glyph = font_obj.glyph_bbox(ord('x'))
+                                    X_glyph = font_obj.glyph_bbox(ord('X'))
+                                    if x_glyph and X_glyph and x_glyph.height > 0 and X_glyph.height > 0:
+                                        glyph_ratio = x_glyph.height / X_glyph.height
+                                        text_xheight_mm = text_capheight_mm * glyph_ratio
+                                        glyph_derived = True
+                                        logger.info(f"  📐 ALL-CAPS: Derived x-height from glyph metrics: cap={text_capheight_mm:.3f}mm × {glyph_ratio:.3f} = {text_xheight_mm:.3f}mm")
+                    except Exception as e:
+                        logger.debug(f"  📐 Glyph-based all-caps derivation failed: {e}")
+                    
+                    if not glyph_derived:
+                        # Fallback: use 0.85 ratio (typical for CLP label fonts)
+                        text_xheight_mm = text_capheight_mm * 0.85
+                        logger.info(f"  📐 ALL-CAPS: Derived x-height from cap-height: {text_capheight_mm:.3f}mm × 0.85 = {text_xheight_mm:.3f}mm (no glyph metrics)")
+                    
+                    logger.info(f"  📐 ALL-CAPS text detected: {len(cap_pts)} cap chars, {len(xheight_pts)} x-height chars")
                 else:
                     logger.warning(f"  ⚠️  Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
                     if size_char_counts:
@@ -2179,14 +2217,71 @@ If no clear number is visible, return 0."""
                     
                     if best_pair:
                         lo_h, lo_c, hi_h, hi_c, ratio = best_pair
-                        xheight_mm = lo_h
-                        xheight_count = lo_c
-                        capheight_mm = hi_h
-                        measurement_approach = 'bimodal-xheight'
-                        bimodal_found = True
-                        logger.info(f"  📐 Bimodal distribution detected (threshold-independent):")
-                        logger.info(f"     x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({hi_c} chars)")
-                        logger.info(f"     ratio={ratio:.3f}, separation={hi_h - lo_h:.3f}mm")
+                        
+                        # DETERMINE IF BIMODAL IS (x-height, cap-height) or (subscripts, body-caps)
+                        # 
+                        # Two scenarios:
+                        # 1. Mixed-case body text: lower peak = x-height (~1.2mm), upper peak = caps (~1.5mm)
+                        # 2. All-caps body text: lower peak = subscripts (~1.6mm), upper peak = caps (~2.1mm)
+                        #
+                        # We can't use text layer (PDF has no text), so use CLP threshold as hint:
+                        # - If lower_peak is VERY close to threshold (< 0.05mm), it IS x-height
+                        # - If upper_peak * 0.85 is VERY close to threshold, upper IS cap-height
+                        # - Otherwise, use peak counts (more chars = body text)
+                        
+                        is_all_caps = False
+                        reason_for_decision = ""
+                        
+                        if clp_threshold_mm > 0:
+                            dist_lower = abs(lo_h - clp_threshold_mm)
+                            derived_from_upper = hi_h * 0.85
+                            dist_upper_derived = abs(derived_from_upper - clp_threshold_mm)
+                            
+                            # If lower peak is much closer to threshold, it IS x-height (mixed-case)
+                            if dist_lower < 0.05:
+                                is_all_caps = False
+                                reason_for_decision = f"lower peak {lo_h:.3f}mm is very close to threshold {clp_threshold_mm}mm (dist={dist_lower:.4f}mm)"
+                            # If upper peak derived is much closer, upper IS cap-height (all-caps)
+                            elif dist_upper_derived < 0.05:
+                                is_all_caps = True
+                                reason_for_decision = f"upper derived {derived_from_upper:.3f}mm is very close to threshold {clp_threshold_mm}mm (dist={dist_upper_derived:.4f}mm)"
+                            # Otherwise, use char count (higher count = body text)
+                            elif lo_c > hi_c:
+                                is_all_caps = False
+                                reason_for_decision = f"lower peak has more chars ({lo_c} > {hi_c}), so it is body text x-height"
+                            else:
+                                is_all_caps = True
+                                reason_for_decision = f"upper peak has more/equal chars ({hi_c} >= {lo_c}), so it is body text cap-height"
+                        else:
+                            # No threshold hint, use char count
+                            if lo_c >= hi_c:
+                                is_all_caps = False
+                                reason_for_decision = f"lower peak has more/equal chars ({lo_c} >= {hi_c}), treating as x-height"
+                            else:
+                                is_all_caps = True
+                                reason_for_decision = f"upper peak has more chars ({hi_c} > {lo_c}), treating as cap-height"
+                        
+                        if is_all_caps:
+                            # Upper peak is body text cap-height; derive x-height
+                            capheight_mm = hi_h
+                            xheight_mm = hi_h * 0.85
+                            xheight_count = hi_c
+                            measurement_approach = 'bimodal-allcaps-derived'
+                            bimodal_found = True
+                            logger.info(f"  📐 Bimodal ALL-CAPS detected ({reason_for_decision}):")
+                            logger.info(f"     Lower peak={lo_h:.3f}mm ({lo_c} chars) = subscripts/formulas")
+                            logger.info(f"     Upper peak={hi_h:.3f}mm ({hi_c} chars) = body text cap-height")
+                            logger.info(f"     Derived x-height={xheight_mm:.3f}mm (cap × 0.85)")
+                        else:
+                            # Lower peak is body text x-height
+                            xheight_mm = lo_h
+                            xheight_count = lo_c
+                            capheight_mm = hi_h
+                            measurement_approach = 'bimodal-xheight'
+                            bimodal_found = True
+                            logger.info(f"  📐 Bimodal distribution detected ({reason_for_decision}):")
+                            logger.info(f"     x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({hi_c} chars)")
+                            logger.info(f"     ratio={ratio:.3f}, separation={hi_h - lo_h:.3f}mm")
                 
                 if not bimodal_found:
                     # No bimodal pair found — use most frequent peak as x-height
@@ -2299,14 +2394,16 @@ If no clear number is visible, return 0."""
                 logger.info(f"  📐 Raw spacings: {[round(s,2) for s in spacings]}")
                 logger.info(f"  📐 Filtered spacings ({len(filtered_spacings)}/{len(spacings)}): {[round(s,2) for s in sorted(filtered_spacings)]}")
                 
-                # CLP line gap = center-to-center - X-HEIGHT (not cap-height)
-                # CLP defines font size as x-height; "distance between lines" ≥ 120% of font size.
-                # The practical gap measurement: c2c minus the dominant body text height (x-height),
-                # since most characters are lowercase and that defines the visual line body.
-                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
+                # CLP line gap = center-to-center minus VISUAL line height
+                # For mixed-case: visual height ≈ cap-height (tallest chars define line bounds)
+                # For all-caps: visual height = cap-height
+                # We always subtract cap-height for gap, as it represents the actual
+                # vertical extent of text on each line.
+                gap_subtract = capheight_mm if capheight_mm > 0 else font_size_mm
+                line_distance_mm = max(0, center_to_center_mm - gap_subtract)
                 
                 logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
-                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} (x-height) = {line_distance_mm:.3f}mm")
+                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {gap_subtract:.3f} (cap-height) = {line_distance_mm:.3f}mm")
                 logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
