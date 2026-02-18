@@ -1726,10 +1726,14 @@ If no clear number is visible, return 0."""
             # represents that line's "font size". Cluster LINES by their mean height
             # to separate body text from headers.
             
-            line_mean_heights = []  # (line_index, mean_char_height_mm)
+            line_mean_heights = []  # (line_index, median_char_height_mm)
             for i, line_h in enumerate(line_char_heights):
                 if line_h:
-                    line_mean_heights.append((i, statistics.mean(line_h)))
+                    # Use MEDIAN instead of mean: resistant to tall caps/ascenders
+                    # pulling the line height upward in mixed-case text.
+                    # In a typical mixed-case line, majority of chars are lowercase,
+                    # so median ≈ x-height (what CLP cares about).
+                    line_mean_heights.append((i, statistics.median(line_h)))
             
             # Cluster line heights (0.2mm bins)
             line_h_bins = Counter(round(h, 1) for _, h in line_mean_heights)
@@ -1759,6 +1763,11 @@ If no clear number is visible, return 0."""
                 logger.info(f"  📐 Using all chars (no clear body text cluster)")
             else:
                 logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
+                # Diagnostic: show which lines are body text and their height stats
+                for i in sorted(list(body_line_indices)[:10]):
+                    if i < len(line_char_heights) and line_char_heights[i]:
+                        lh = line_char_heights[i]
+                        logger.info(f"       Line {i}: {len(lh)} chars, mean={statistics.mean(lh):.3f}mm, median={statistics.median(lh):.3f}mm, range={min(lh):.2f}-{max(lh):.2f}mm")
             
             # ================================================================
             # PRIMARY: Try text-based x-height measurement (uses actual char identities)
