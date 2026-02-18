@@ -2370,21 +2370,41 @@ If no clear number is visible, return 0."""
             if len(body_text_line_ys) >= 2:
                 spacings = [body_text_line_ys[i+1] - body_text_line_ys[i] 
                            for i in range(len(body_text_line_ys) - 1)]
-                # IQR-based outlier removal: remove spacings outside 1.5×IQR
-                # This handles paragraph breaks (huge gaps) and collapsed lines (tiny gaps)
-                sorted_spacings = sorted(spacings)
-                n = len(sorted_spacings)
-                if n >= 4:
-                    q1 = sorted_spacings[n // 4]
-                    q3 = sorted_spacings[3 * n // 4]
-                    iqr = q3 - q1
-                    lower_bound = q1 - 1.5 * max(iqr, 0.3)  # min IQR of 0.3mm to avoid over-filtering
-                    upper_bound = q3 + 1.5 * max(iqr, 0.3)
-                    filtered_spacings = [s for s in spacings if lower_bound <= s <= upper_bound]
+                # Physical constraint filter + IQR:
+                # 1. Center-to-center must be >= cap_height (lines can't overlap)
+                # 2. Then IQR on the physically-plausible spacings
+                min_c2c = capheight_mm if capheight_mm > 0 else font_size_mm
+                # Upper sanity: body text c2c shouldn't exceed 5× cap height
+                max_c2c = min_c2c * 5
+                physical_spacings = [s for s in spacings if min_c2c * 0.9 <= s <= max_c2c]
+                
+                if len(physical_spacings) >= 3:
+                    # IQR on physically-plausible spacings
+                    sorted_spacings = sorted(physical_spacings)
+                    n = len(sorted_spacings)
+                    if n >= 4:
+                        q1 = sorted_spacings[n // 4]
+                        q3 = sorted_spacings[3 * n // 4]
+                        iqr = q3 - q1
+                        lower_bound = q1 - 1.5 * max(iqr, 0.3)
+                        upper_bound = q3 + 1.5 * max(iqr, 0.3)
+                        filtered_spacings = [s for s in physical_spacings if lower_bound <= s <= upper_bound]
+                    else:
+                        filtered_spacings = physical_spacings
                 else:
-                    # Too few spacings for IQR — simple outlier removal: drop >3× median
-                    med = statistics.median(spacings)
-                    filtered_spacings = [s for s in spacings if s <= med * 2.5 and s >= med * 0.4]
+                    # Fallback: original IQR on all spacings
+                    sorted_spacings = sorted(spacings)
+                    n = len(sorted_spacings)
+                    if n >= 4:
+                        q1 = sorted_spacings[n // 4]
+                        q3 = sorted_spacings[3 * n // 4]
+                        iqr = q3 - q1
+                        lower_bound = q1 - 1.5 * max(iqr, 0.3)
+                        upper_bound = q3 + 1.5 * max(iqr, 0.3)
+                        filtered_spacings = [s for s in spacings if lower_bound <= s <= upper_bound]
+                    else:
+                        med = statistics.median(spacings)
+                        filtered_spacings = [s for s in spacings if s <= med * 2.5 and s >= med * 0.4]
                 
                 if not filtered_spacings:
                     filtered_spacings = spacings  # fallback: use all
@@ -2394,16 +2414,13 @@ If no clear number is visible, return 0."""
                 logger.info(f"  📐 Raw spacings: {[round(s,2) for s in spacings]}")
                 logger.info(f"  📐 Filtered spacings ({len(filtered_spacings)}/{len(spacings)}): {[round(s,2) for s in sorted(filtered_spacings)]}")
                 
-                # CLP line gap = center-to-center minus VISUAL line height
-                # For mixed-case: visual height ≈ cap-height (tallest chars define line bounds)
-                # For all-caps: visual height = cap-height
-                # We always subtract cap-height for gap, as it represents the actual
-                # vertical extent of text on each line.
-                gap_subtract = capheight_mm if capheight_mm > 0 else font_size_mm
-                line_distance_mm = max(0, center_to_center_mm - gap_subtract)
+                # CLP line gap = center-to-center minus x_height (the reported font_size_mm)
+                # font_size_mm is always x-height, whether measured directly or derived from cap-height
+                # This was SETTLED: gap = c2c - x_height, NOT c2c - cap_height
+                line_distance_mm = max(0, center_to_center_mm - font_size_mm)
                 
                 logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
-                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {gap_subtract:.3f} (cap-height) = {line_distance_mm:.3f}mm")
+                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} (x-height) = {line_distance_mm:.3f}mm")
                 logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
