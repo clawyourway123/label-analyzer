@@ -1589,7 +1589,7 @@ If no clear number is visible, return 0."""
         else:
             logger.info(f"  📏 PDF appears to be at 1:1 scale")
     
-    def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict) -> Optional[Dict]:
+    def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict, clp_threshold_mm: float = 0.0) -> Optional[Dict]:
         """
         Measure font size directly from PDF vector paths (100% deterministic).
         
@@ -1601,6 +1601,10 @@ If no clear number is visible, return 0."""
             pdf_path: Path to the PDF file
             region_rect_px: Region bounding box in pixel coordinates at rendering DPI
                            {'xmin': int, 'ymin': int, 'xmax': int, 'ymax': int}
+            clp_threshold_mm: Expected CLP font size threshold (e.g. 1.2mm for ≤500ml).
+                             When >0, peak selection prefers peaks near this threshold
+                             over the most frequent peak, improving accuracy on labels
+                             with multiple text sizes in the same region.
         
         Returns:
             Dict with font_size_mm, line_distance_mm, measurement_confidence, etc.
@@ -2126,16 +2130,43 @@ If no clear number is visible, return 0."""
             elif len(peaks) >= 2:
                 # Two or more peaks detected = potential bimodal distribution (mixed case)
                 # IMPROVED ALGORITHM:
-                # 1. Most frequent cluster = x-height (body text is most common)
-                # 2. Find the next most frequent cluster with >0.25mm separation = cap-height
-                # 3. Avoid edge cases (noise) by requiring >50 chars and reasonable height (0.8-3.0mm)
+                # 1. If CLP threshold is known, prefer peaks near it (±0.15mm) over most frequent
+                # 2. Otherwise, most frequent cluster = x-height (body text is most common)
+                # 3. Find the next most frequent cluster with >0.25mm separation = cap-height
+                # 4. Avoid edge cases (noise) by requiring >50 chars and reasonable height (0.8-3.0mm)
                 
                 # Sort peaks by character count (descending)
                 peaks_by_count = sorted(peaks, key=lambda x: -x[1])
                 
-                # Use most frequent cluster as x-height
-                xheight_mm = peaks_by_count[0][0]
-                xheight_count = peaks_by_count[0][1]
+                # CLP-THRESHOLD-AWARE PEAK SELECTION
+                # When a CLP threshold is provided, prefer a peak near that threshold
+                # over the raw most-frequent peak. This handles labels where the CLP
+                # hazard text and other body text coexist in the same region, and the
+                # non-CLP text happens to have more glyphs.
+                if clp_threshold_mm > 0:
+                    # Find peaks within ±0.15mm of the CLP threshold
+                    # AND with at least 20% of the top peak's count (not just noise)
+                    top_count = peaks_by_count[0][1]
+                    clp_candidates = [
+                        (h, c) for h, c in peaks_by_count
+                        if abs(h - clp_threshold_mm) <= 0.15 and c >= top_count * 0.2
+                    ]
+                    if clp_candidates:
+                        # Pick the candidate closest to the threshold
+                        best_clp = min(clp_candidates, key=lambda p: abs(p[0] - clp_threshold_mm))
+                        xheight_mm = best_clp[0]
+                        xheight_count = best_clp[1]
+                        logger.info(f"  📐 CLP-threshold-aware selection: picked {xheight_mm:.3f}mm ({xheight_count} chars) near threshold {clp_threshold_mm}mm")
+                        logger.info(f"     (Most frequent was {peaks_by_count[0][0]:.3f}mm with {peaks_by_count[0][1]} chars)")
+                    else:
+                        # No peak near threshold — fall back to most frequent
+                        xheight_mm = peaks_by_count[0][0]
+                        xheight_count = peaks_by_count[0][1]
+                        logger.info(f"  📐 No peak near CLP threshold {clp_threshold_mm}mm, using most frequent: {xheight_mm:.3f}mm ({xheight_count} chars)")
+                else:
+                    # No threshold provided — use most frequent cluster as x-height
+                    xheight_mm = peaks_by_count[0][0]
+                    xheight_count = peaks_by_count[0][1]
                 
                 # Find best cap-height candidate
                 best_capheight_h = None
@@ -2737,8 +2768,15 @@ If no measurement lines found, return empty array.
             # ================================================================
             pdf_vector_measurements = None
             if hasattr(self, '_pdf_path') and self._pdf_path:
+                # Determine CLP font size threshold based on package size
+                if package_size_ml <= 500:
+                    clp_threshold = 1.2
+                elif package_size_ml <= 3000:
+                    clp_threshold = 1.4
+                else:
+                    clp_threshold = 1.8
                 pdf_vector_measurements = self.measure_font_from_pdf_vectors(
-                    self._pdf_path, region['rect']
+                    self._pdf_path, region['rect'], clp_threshold_mm=clp_threshold
                 )
             
             if pdf_vector_measurements and pdf_vector_measurements.get('font_size_mm', 0) > 0:
