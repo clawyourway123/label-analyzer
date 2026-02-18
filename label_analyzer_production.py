@@ -49,9 +49,10 @@ fitz.TOOLS.set_small_glyph_heights(True)
 # ============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(levelname)s | %(name)s | %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("label_analyzer")
+logger.setLevel(logging.INFO)
 
 
 # ============================================================================
@@ -416,7 +417,7 @@ class CalibrationResult:
                 if cache_dir_path.exists():
                     with open(cache_dir_path, 'r') as f:
                         self.disk_cache = json.load(f)
-                        logger.info(f"  💾 Loaded DPI cache with {len(self.disk_cache)} entries")
+                        logger.info(f"[CACHE] Loaded DPI cache with {len(self.disk_cache)} entries")
             except Exception as e:
                 logger.warning(f"  ⚠️ Failed to load DPI cache: {e}")
                 self.disk_cache = {}
@@ -432,7 +433,7 @@ class CalibrationResult:
         """
         if pdf_hash in self.disk_cache:
             cached_dpi = self.disk_cache[pdf_hash]
-            logger.info(f"  🔒 DPI locked (cached): {cached_dpi} DPI")
+            logger.info(f"[LOCK] DPI locked (cached): {cached_dpi} DPI")
             self.locked_dpi = cached_dpi
             self.true_dpi = cached_dpi
             self.dpmm = cached_dpi / 25.4
@@ -456,7 +457,7 @@ class CalibrationResult:
                 self.disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.disk_cache_path, 'w') as f:
                     json.dump(self.disk_cache, f, indent=2)
-                logger.info(f"  💾 Saved DPI to cache: {pdf_hash[:8]}... → {dpi} DPI")
+                logger.info(f"[CACHE] Saved DPI to cache: {pdf_hash[:8]}... → {dpi} DPI")
                 return True
             except Exception as e:
                 logger.warning(f"  ⚠️ Failed to save DPI cache: {e}")
@@ -472,7 +473,7 @@ class CalibrationResult:
         """
         # If DPI is locked, don't recalibrate
         if self.locked_dpi is not None:
-            logger.info(f"  🔒 DPI locked at {self.locked_dpi}, skipping recalibration")
+            logger.info(f"[LOCK] DPI locked at {self.locked_dpi}, skipping recalibration")
             return True
         
         px_length = ((line.end_point.x - line.start_point.x)**2 + 
@@ -485,7 +486,7 @@ class CalibrationResult:
             if ref_key in self.reference_dpi_cache:
                 # Reuse cached DPI for this reference
                 cached_dpi = self.reference_dpi_cache[ref_key]
-                logger.info(f"  ℹ️  Reference {line.value_mm}mm seen before, reusing cached DPI: {cached_dpi} DPI")
+                logger.info(f"[INFO] Reference {line.value_mm}mm seen before, reusing cached DPI: {cached_dpi} DPI")
                 self.true_dpi = cached_dpi
                 self.dpmm = cached_dpi / 25.4
                 self.measurement_line = line
@@ -507,7 +508,7 @@ class CalibrationResult:
             self.measurement_line = line
             self.is_calibrated = True
             logger.info(f"  Calibrated DPI: {self.true_dpi} DPI ({self.dpmm:.2f} px/mm) [reference: {line.value_mm}mm]")
-            logger.info(f"  🔒 Locking DPI at {self.true_dpi} for this PDF")
+            logger.info(f"[LOCK] Locking DPI at {self.true_dpi} for this PDF")
             return True
         return False
 
@@ -718,28 +719,35 @@ CLP_VALIDATION_SCHEMA = {
     "required": ["font_size_pixels", "font_size_mm", "line_distance_pixels", "line_distance_mm", "background_color", "text_color", "contrast_assessment", "measurement_confidence", "measurement_method"]
 }
 
-def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 500, is_inner_packaging: bool = False) -> Dict:
-    """Apply CLP rules to measurements. 100% deterministic.
+def validate_measurements_against_rules(
+    metrics: Dict,
+    package_size_ml: int = 500,
+    is_inner_packaging: bool = False
+) -> Dict:
+    """Validate measured font/spacing against EU CLP Regulation 1272/2008.
     
-    EU Regulation 1272/2008 (CLP) Compliance Rules:
-    - Rule 1: Font size (package-size dependent)
-    - Rule 2: Line distance (120% of font size)
-    - Rule 3: White background + Black text (STRICT)
-    - Rule 4: Inner packaging ≤10ml exemption (font can be smaller but must be legible)
+    Applies three core rules:
+    - Rule 1 (Font Size): Package-size dependent thresholds
+      - ≤500ml: ≥1.2mm | 500-3000ml: ≥1.4mm | >3000ml: ≥1.8mm
+      - Inner packaging ≤10ml: exemption (must remain legible)
+    - Rule 2 (Line Distance): Must be ≥120% of font size
+    - Rule 3 (Contrast): White bg + black text required (or yellow + black)
     
-    Returns "SKIP" status when measurements are too uncertain to evaluate.
-    Only returns "PASS" or "FAIL" when measurement_confidence >= 0.5.
+    Safety: Returns "SKIP" when measurement confidence <0.5 (too uncertain to evaluate).
     
     Args:
-        metrics: Measurement dict with font_size_mm, line_distance_mm, colors, etc.
-        package_size_ml: Package size in ml (affects font threshold)
-        is_inner_packaging: True if this is inner packaging ≤10ml (exemption applies)
+        metrics: Dict containing font_size_mm, line_distance_mm, contrast_assessment, etc.
+        package_size_ml: Container size in ml (determines font threshold)
+        is_inner_packaging: True if ≤10ml inner packaging (uses exemption)
+    
+    Returns:
+        Dict with rule_results, overall_compliance ("PASS"|"FAIL"|"SKIP"), and compliance_confidence
     """
     
     # Check if measurements are too uncertain to evaluate
     measurement_confidence = metrics.get("measurement_confidence", 0)
     if measurement_confidence < 0.5:
-        logger.warning(f"  ⚠️  Measurement confidence too low ({measurement_confidence:.2f}), marking as SKIP")
+        logger.warning(f"WARNING: Measurement confidence too low ({measurement_confidence:.2f}), marking as SKIP")
         return {
             "rule_1_font_size": {
                 "status": "SKIP",
@@ -1192,13 +1200,13 @@ If you cannot find a size declaration, return value_in_ml=null with low confiden
         confidence = result.get("confidence", 0.0)
         
         if value_ml and confidence >= 0.5:
-            logger.info(f"  ✓ Detected package size: {result.get('value')} {result.get('unit')} = {int(value_ml)}ml (confidence: {confidence:.0%})")
+            logger.info(f"✓ Detected package size: {result.get('value')} {result.get('unit')} = {int(value_ml)}ml (confidence: {confidence:.0%})")
             return int(value_ml), confidence
         else:
             # SAFE FALLBACK: Use 5000ml (strictest threshold: 1.8mm) when detection fails.
             # This avoids false passes — if font meets 1.8mm threshold, it meets all thresholds.
             # Previously defaulted to 500ml (1.2mm) which caused false passes on larger containers.
-            logger.warning(f"  ⚠️  Could not reliably detect package size (confidence: {confidence:.0%}), using SAFE default 5000ml (strictest threshold) — font size thresholds may be conservative")
+            logger.warning(f"WARNING: Could not reliably detect package size (confidence: {confidence:.0%}), using SAFE default 5000ml (strictest threshold) — font size thresholds may be conservative")
             return 5000, 0.0  # Safe fallback — strictest threshold
             
     except (APIError, json.JSONDecodeError, KeyError) as e:
@@ -1417,7 +1425,7 @@ class GeminiClient:
             )
             api_time = time_module.time() - api_call_start
             response_len = len(response.text)
-            logger.info(f"  ✓ Gemini response received ({api_time:.1f}s, {response_len} chars)")
+            logger.info(f"✓ Gemini response received ({api_time:.1f}s, {response_len} chars)")
             logger.debug(f"    Response preview: {response.text[:200]}")
             return response.text
 
@@ -1614,7 +1622,7 @@ class LabelAnalyzer:
             logger.info("  📏 No measurement lines found for auto scale detection")
             return
         
-        logger.info(f"  📏 Auto scale: found {len(candidates)} candidate measurement lines")
+        logger.info(f"[SCALE] Auto scale: found {len(candidates)} candidate measurement lines")
         
         # Render crops around each measurement line and OCR the label
         zoom = 3.0  # Render at high res for OCR readability
@@ -1665,7 +1673,7 @@ If no clear number is visible, return 0."""
                 if read_value > 0:
                     scale = read_value / length_mm
                     ocr_results.append((orient, length_mm, read_value, scale))
-                    logger.info(f"  📏 OCR: {orient} line {length_mm:.2f}mm → label reads {read_value}mm → scale={scale:.4f}")
+                    logger.info(f"[SCALE] OCR: {orient} line {length_mm:.2f}mm → label reads {read_value}mm → scale={scale:.4f}")
             except Exception as e:
                 logger.warning(f"  ⚠️ OCR failed for {orient} {length_mm:.1f}mm line: {e}")
                 continue
@@ -1685,9 +1693,9 @@ If no clear number is visible, return 0."""
         self._pdf_scale_cache[pdf_path] = (v_scale, h_scale)
         
         if v_scale != 1.0 or h_scale != 1.0:
-            logger.info(f"  📏 Auto-detected scales: vertical={v_scale:.4f}, horizontal={h_scale:.4f}")
+            logger.info(f"[SCALE] Auto-detected scales: vertical={v_scale:.4f}, horizontal={h_scale:.4f}")
         else:
-            logger.info(f"  📏 PDF appears to be at 1:1 scale")
+            logger.info(f"[SCALE] PDF appears to be at 1:1 scale")
     
     def measure_font_from_pdf_vectors(self, pdf_path: str, region_rect_px: Dict, clp_threshold_mm: float = 0.0) -> Optional[Dict]:
         """
@@ -1733,7 +1741,7 @@ If no clear number is visible, return 0."""
             if hasattr(self, '_pdf_scale_cache') and pdf_path in self._pdf_scale_cache:
                 vertical_scale, horizontal_scale = self._pdf_scale_cache[pdf_path]
                 if vertical_scale != 1.0 or horizontal_scale != 1.0:
-                    logger.info(f"  📏 Using cached scale: v={vertical_scale:.4f}, h={horizontal_scale:.4f}")
+                    logger.info(f"[SCALE] Using cached scale: v={vertical_scale:.4f}, h={horizontal_scale:.4f}")
             elif hasattr(self, '_reference_dimensions') and self._reference_dimensions:
                 # MANUAL MODE: user provided known dimensions
                 all_drawings = page.get_drawings()
@@ -1777,7 +1785,7 @@ If no clear number is visible, return 0."""
                             vertical_scale = scale
                         else:
                             horizontal_scale = scale
-                        logger.info(f"  📏 Scale from ref {ref_mm}mm: {orient} {vec_mm:.2f}mm → scale={scale:.4f}")
+                        logger.info(f"[SCALE] Scale from ref {ref_mm}mm: {orient} {vec_mm:.2f}mm → scale={scale:.4f}")
                 
                 if not hasattr(self, '_pdf_scale_cache'):
                     self._pdf_scale_cache = {}
@@ -1787,13 +1795,13 @@ If no clear number is visible, return 0."""
                 # and causes measurement variance (see MEMORY.md: "Unstable DPI Calibration").
                 # PDF vectors are in absolute PDF points (1/72 inch) — no scale correction needed.
                 # If a PDF IS drawn at non-1:1 scale, use manual _reference_dimensions instead.
-                logger.info(f"  📏 No manual reference dimensions — using raw PDF points (1:1 scale)")
+                logger.info(f"[SCALE] No manual reference dimensions — using raw PDF points (1:1 scale)")
                 if not hasattr(self, '_pdf_scale_cache'):
                     self._pdf_scale_cache = {}
                 self._pdf_scale_cache[pdf_path] = (1.0, 1.0)
             
             if vertical_scale != 1.0 or horizontal_scale != 1.0:
-                logger.info(f"  📏 Scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
+                logger.info(f"[SCALE] Scales: vertical={vertical_scale:.4f}, horizontal={horizontal_scale:.4f}")
             
             # Convert pixel coordinates back to PDF points
             zoom = self.original_dpi / 72  # Same zoom used in pdf_to_image()
@@ -1802,8 +1810,8 @@ If no clear number is visible, return 0."""
             pt_xmax = region_rect_px['xmax'] / zoom
             pt_ymax = region_rect_px['ymax'] / zoom
             
-            logger.info(f"  📐 PDF vector measurement: region px=({region_rect_px['xmin']},{region_rect_px['ymin']})-({region_rect_px['xmax']},{region_rect_px['ymax']})")
-            logger.info(f"  📐 Converted to PDF pts: ({pt_xmin:.1f},{pt_ymin:.1f})-({pt_xmax:.1f},{pt_ymax:.1f})")
+            logger.info(f"[MEASURE] PDF vector measurement: region px=({region_rect_px['xmin']},{region_rect_px['ymin']})-({region_rect_px['xmax']},{region_rect_px['ymax']})")
+            logger.info(f"[MEASURE] Converted to PDF pts: ({pt_xmin:.1f},{pt_ymin:.1f})-({pt_xmax:.1f},{pt_ymax:.1f})")
             
             # Extract all drawings in this region
             drawings = page.get_drawings()
@@ -1836,7 +1844,7 @@ If no clear number is visible, return 0."""
                 logger.info(f"  ⚠️ Only {len(region_paths)} glyph paths in region — too few for reliable measurement")
                 return None
             
-            logger.info(f"  📐 Found {len(region_paths)} glyph paths in region")
+            logger.info(f"[MEASURE] Found {len(region_paths)} glyph paths in region")
             
             # Group paths into text lines by y_center
             # CRITICAL: Compare against line MEDIAN y_center (not last element)
@@ -1869,7 +1877,7 @@ If no clear number is visible, return 0."""
                 logger.info(f"  ⚠️ No text lines detected in region")
                 return None
             
-            logger.info(f"  📐 Detected {len(text_lines)} text lines (tolerance={line_tolerance:.1f}pt)")
+            logger.info(f"[MEASURE] Detected {len(text_lines)} text lines (tolerance={line_tolerance:.1f}pt)")
             
             # For each text line: group overlapping paths into characters, measure heights
             line_char_heights = []  # Per-line list of character heights in mm
@@ -1955,9 +1963,9 @@ If no clear number is visible, return 0."""
             if not body_char_heights or len(body_char_heights) < 5:
                 body_char_heights = all_char_heights_mm
                 body_line_indices = set(range(len(text_lines)))
-                logger.info(f"  📐 Using all chars (no clear body text cluster)")
+                logger.info(f"[MEASURE] Using all chars (no clear body text cluster)")
             else:
-                logger.info(f"  📐 Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
+                logger.info(f"[MEASURE] Body text: {len(body_line_indices)} lines, {len(body_char_heights)} chars, line_height_cluster={best_line_bin:.1f}mm")
                 # Diagnostic: show which lines are body text and their height stats
                 for i in sorted(list(body_line_indices)[:10]):
                     if i < len(line_char_heights) and line_char_heights[i]:
@@ -2006,8 +2014,8 @@ If no clear number is visible, return 0."""
                 
                 if size_char_counts:
                     body_font_size = max(size_char_counts, key=size_char_counts.get)
-                    logger.info(f"  📐 Font sizes in region: {dict(sorted(size_char_counts.items()))}")
-                    logger.info(f"  📐 Body text font size: {body_font_size}pt ({size_char_counts[body_font_size]} chars)")
+                    logger.info(f"[MEASURE] Font sizes in region: {dict(sorted(size_char_counts.items()))}")
+                    logger.info(f"[MEASURE] Body text font size: {body_font_size}pt ({size_char_counts[body_font_size]} chars)")
                     
                     # Only measure chars from body text font size (±0.5pt tolerance)
                     body_spans = []
@@ -2059,13 +2067,13 @@ If no clear number is visible, return 0."""
                 if len(xheight_pts) >= 3:  # Lowered from 5: even 3 chars gives reliable median
                     text_xheight_mm = statistics.median(xheight_pts)  * PT_TO_MM
                     bbox_xheight_mm = statistics.median(xheight_bbox_pts)  * PT_TO_MM
-                    logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars, method=origin-based)")
+                    logger.info(f"[MEASURE] TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars, method=origin-based)")
                     if abs(text_xheight_mm - bbox_xheight_mm) > 0.01:
-                        logger.info(f"  📐 TEXT-BASED bbox x-height would be: {bbox_xheight_mm:.3f}mm (origin-based saved {bbox_xheight_mm - text_xheight_mm:.3f}mm)")
+                        logger.info(f"[MEASURE] TEXT-BASED bbox x-height would be: {bbox_xheight_mm:.3f}mm (origin-based saved {bbox_xheight_mm - text_xheight_mm:.3f}mm)")
                     if len(cap_pts) >= 3:
                         text_capheight_mm = statistics.median(cap_pts)  * PT_TO_MM
-                        logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
-                        logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
+                        logger.info(f"[MEASURE] TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
+                        logger.info(f"[MEASURE] TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
                     
                     # STEP 4: Glyph-based x-height refinement using embedded font metrics
                     # PyMuPDF Font.glyph_bbox() gives the precise glyph outline bbox,
@@ -2100,23 +2108,23 @@ If no clear number is visible, return 0."""
                                         # Actual x-height = glyph_bbox.height * font_size_pt
                                         glyph_xheight_pt = x_glyph_bbox.height * font_size_pt
                                         glyph_xheight_mm = glyph_xheight_pt  * PT_TO_MM
-                                        logger.info(f"  📐 GLYPH-BASED x-height: {glyph_xheight_mm:.3f}mm (font={font_name}, size={font_size_pt}pt, glyph_ratio={x_glyph_bbox.height:.4f})")
+                                        logger.info(f"[MEASURE] GLYPH-BASED x-height: {glyph_xheight_mm:.3f}mm (font={font_name}, size={font_size_pt}pt, glyph_ratio={x_glyph_bbox.height:.4f})")
                                         
                                         # Also get cap-height from 'X' glyph
                                         cap_glyph_bbox = font_obj.glyph_bbox(ord('X'))
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
                                             glyph_capheight_mm = cap_glyph_bbox.height * font_size_pt  * PT_TO_MM
-                                            logger.info(f"  📐 GLYPH-BASED cap-height: {glyph_capheight_mm:.3f}mm (glyph_ratio={cap_glyph_bbox.height:.4f})")
+                                            logger.info(f"[MEASURE] GLYPH-BASED cap-height: {glyph_capheight_mm:.3f}mm (glyph_ratio={cap_glyph_bbox.height:.4f})")
                                         
                                         # Compare with origin-based measurement
                                         diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm * 100 if glyph_xheight_mm > 0 else 0
-                                        logger.info(f"  📐 Origin vs Glyph x-height difference: {diff_pct:.1f}% (origin={text_xheight_mm:.3f}mm, glyph={glyph_xheight_mm:.3f}mm)")
+                                        logger.info(f"[MEASURE] Origin vs Glyph x-height difference: {diff_pct:.1f}% (origin={text_xheight_mm:.3f}mm, glyph={glyph_xheight_mm:.3f}mm)")
                                         
                                         # Prefer glyph-based, but cross-validate against origin-based
                                         if diff_pct > 20:
-                                            logger.error(f"  ❌ GLYPH vs ORIGIN disagree by {diff_pct:.1f}%: glyph={glyph_xheight_mm:.3f}mm, origin={text_xheight_mm:.3f}mm")
+                                            logger.error(f"ERROR: GLYPH vs ORIGIN disagree by {diff_pct:.1f}%: glyph={glyph_xheight_mm:.3f}mm, origin={text_xheight_mm:.3f}mm")
                                             logger.error(f"     Possible subset font issue — using glyph (higher confidence) but flagging for review")
-                                        logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (gold standard, origin diff={diff_pct:.1f}%)")
+                                        logger.info(f"[MEASURE] ⚡ Preferring GLYPH-BASED x-height (gold standard, origin diff={diff_pct:.1f}%)")
                                         text_xheight_mm = glyph_xheight_mm
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
                                             text_capheight_mm = glyph_capheight_mm
@@ -2127,7 +2135,7 @@ If no clear number is visible, return 0."""
                             else:
                                 logger.debug(f"  📐 Font '{font_name}' not found in page fonts for glyph-based measurement")
                     except Exception as glyph_err:
-                        logger.warning(f"  ⚠️  Glyph-based measurement failed for font: {glyph_err}")
+                        logger.warning(f"WARNING: Glyph-based measurement failed for font: {glyph_err}")
                         logger.warning(f"     Falling back to origin-based measurement (less accurate)")
                     
                 elif len(cap_pts) >= 3:
@@ -2158,20 +2166,20 @@ If no clear number is visible, return 0."""
                                         glyph_ratio = x_glyph.height / X_glyph.height
                                         text_xheight_mm = text_capheight_mm * glyph_ratio
                                         glyph_derived = True
-                                        logger.info(f"  📐 ALL-CAPS: Derived x-height from glyph metrics: cap={text_capheight_mm:.3f}mm × {glyph_ratio:.3f} = {text_xheight_mm:.3f}mm")
+                                        logger.info(f"[MEASURE] ALL-CAPS: Derived x-height from glyph metrics: cap={text_capheight_mm:.3f}mm × {glyph_ratio:.3f} = {text_xheight_mm:.3f}mm")
                     except Exception as e:
                         logger.debug(f"  📐 Glyph-based all-caps derivation failed: {e}")
                     
                     if not glyph_derived:
                         # Fallback: use 0.85 ratio (typical for CLP label fonts)
                         text_xheight_mm = text_capheight_mm  * CAP_HEIGHT_TO_X_HEIGHT_RATIO
-                        logger.info(f"  📐 ALL-CAPS: Derived x-height from cap-height: {text_capheight_mm:.3f}mm × 0.85 = {text_xheight_mm:.3f}mm (no glyph metrics)")
+                        logger.info(f"[MEASURE] ALL-CAPS: Derived x-height from cap-height: {text_capheight_mm:.3f}mm × 0.85 = {text_xheight_mm:.3f}mm (no glyph metrics)")
                     
-                    logger.info(f"  📐 ALL-CAPS text detected: {len(cap_pts)} cap chars, {len(xheight_pts)} x-height chars")
+                    logger.info(f"[MEASURE] ALL-CAPS text detected: {len(cap_pts)} cap chars, {len(xheight_pts)} x-height chars")
                 else:
-                    logger.warning(f"  ⚠️  Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
+                    logger.warning(f"WARNING: Text-based measurement FAILED: only {len(xheight_pts)} x-height chars found (need ≥3) — falling back to vector clustering (less reliable)")
                     if size_char_counts:
-                        logger.warning(f"  ⚠️  Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase (chars in set: aceimnorsuvwxz)")
+                        logger.warning(f"WARNING: Hint: {sum(size_char_counts.values())} total chars in region, but only {len(xheight_pts)} are x-height lowercase (chars in set: aceimnorsuvwxz)")
             except Exception as e:
                 logger.debug(f"  📐 Text-based measurement failed: {e}")
             
@@ -2187,13 +2195,13 @@ If no clear number is visible, return 0."""
             filtered_body_heights = [h for h in body_char_heights if h >= MIN_BODY_TEXT_HEIGHT]
             if len(filtered_body_heights) >= 10:
                 body_char_heights = filtered_body_heights
-                logger.info(f"  📐 Filtered to {len(body_char_heights)} chars ≥{MIN_BODY_TEXT_HEIGHT}mm (removed {len(filtered_body_heights)} tiny glyphs)")
+                logger.info(f"[MEASURE] Filtered to {len(body_char_heights)} chars ≥{MIN_BODY_TEXT_HEIGHT}mm (removed {len(filtered_body_heights)} tiny glyphs)")
             
             # Build histogram of body char heights (0.02mm bins)
             height_bins = Counter(round(h, 2) for h in body_char_heights)
             
             # DEBUG: Show raw histogram (top 10 bins)
-            logger.info(f"  🔬 DEBUG: Height histogram (top 10):")
+            logger.info(f"[DEBUG] DEBUG: Height histogram (top 10):")
             for h, c in height_bins.most_common(10):
                 logger.info(f"       {h:.2f}mm: {c} chars")
             
@@ -2218,7 +2226,7 @@ If no clear number is visible, return 0."""
             
             # If we got too many clusters (>8), relax tolerance to ±0.08mm
             if len(clusters) > 8:
-                logger.info(f"  📐 Too many clusters ({len(clusters)}) with tight tolerance, relaxing to ±0.08mm")
+                logger.info(f"[MEASURE] Too many clusters ({len(clusters)}) with tight tolerance, relaxing to ±0.08mm")
                 clusters = []
                 for h in sorted_heights:
                     count = height_bins[h]
@@ -2237,7 +2245,7 @@ If no clear number is visible, return 0."""
                 cluster[0] = statistics.median(cluster[2])
             
             # DEBUG: Show clusters after merging
-            logger.info(f"  🔬 DEBUG: Clusters after merging:")
+            logger.info(f"[DEBUG] DEBUG: Clusters after merging:")
             for i, (center, count, members) in enumerate(clusters):
                 unique_members = sorted(set(members))
                 logger.info(f"       Cluster {i+1}: center={center:.3f}mm, count={count}, range={min(unique_members):.2f}-{max(unique_members):.2f}mm")
@@ -2249,11 +2257,11 @@ If no clear number is visible, return 0."""
             peaks.sort(key=lambda x: -x[1])
             
             # DEBUG: Show final peaks
-            logger.info(f"  🔬 DEBUG: Final peaks (sorted by count):")
+            logger.info(f"[DEBUG] DEBUG: Final peaks (sorted by count):")
             for i, (h, c) in enumerate(peaks[:5]):
                 logger.info(f"       Peak {i+1}: {h:.3f}mm, {c} chars")
             
-            logger.info(f"  📐 Height clusters: {[(round(h,3), n) for h, n in peaks[:5]]}")
+            logger.info(f"[MEASURE] Height clusters: {[(round(h,3), n) for h, n in peaks[:5]]}")
             
             # Determine x-height and cap-height
             xheight_mm = 0.0
@@ -2265,7 +2273,7 @@ If no clear number is visible, return 0."""
                 xheight_mm = text_xheight_mm
                 capheight_mm = text_capheight_mm if text_capheight_mm else text_xheight_mm / 0.70
                 measurement_approach = 'text-rawdict-xheight'
-                logger.info(f"  📐 Using TEXT-BASED x-height: {xheight_mm:.3f}mm (most reliable)")
+                logger.info(f"[MEASURE] Using TEXT-BASED x-height: {xheight_mm:.3f}mm (most reliable)")
             elif len(peaks) >= 2:
                 # Two or more peaks detected = potential bimodal distribution (mixed case)
                 # ALGORITHM (THRESHOLD-INDEPENDENT):
@@ -2365,7 +2373,7 @@ If no clear number is visible, return 0."""
                             xheight_count = hi_c
                             measurement_approach = 'bimodal-allcaps-derived'
                             bimodal_found = True
-                            logger.info(f"  📐 Bimodal ALL-CAPS detected ({reason_for_decision}):")
+                            logger.info(f"[MEASURE] Bimodal ALL-CAPS detected ({reason_for_decision}):")
                             logger.info(f"     Lower peak={lo_h:.3f}mm ({lo_c} chars) = subscripts/formulas")
                             logger.info(f"     Upper peak={hi_h:.3f}mm ({hi_c} chars) = body text cap-height")
                             logger.info(f"     Derived x-height={xheight_mm:.3f}mm (cap × 0.85)")
@@ -2376,7 +2384,7 @@ If no clear number is visible, return 0."""
                             capheight_mm = hi_h
                             measurement_approach = 'bimodal-xheight'
                             bimodal_found = True
-                            logger.info(f"  📐 Bimodal distribution detected ({reason_for_decision}):")
+                            logger.info(f"[MEASURE] Bimodal distribution detected ({reason_for_decision}):")
                             logger.info(f"     x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({hi_c} chars)")
                             logger.info(f"     ratio={ratio:.3f}, separation={hi_h - lo_h:.3f}mm")
                 
@@ -2398,15 +2406,15 @@ If no clear number is visible, return 0."""
                     if best_capheight_h is not None:
                         capheight_mm = best_capheight_h
                         measurement_approach = 'bimodal-xheight'
-                        logger.info(f"  📐 Bimodal (most-frequent): x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars)")
+                        logger.info(f"[MEASURE] Bimodal (most-frequent): x-height={xheight_mm:.3f}mm ({xheight_count} chars), cap-height={capheight_mm:.3f}mm ({best_capheight_c} chars)")
                     else:
                         capheight_mm = xheight_mm
                         measurement_approach = 'single-peak'
-                        logger.info(f"  📐 Only one significant cluster: {xheight_mm:.3f}mm ({xheight_count} chars)")
-                        logger.info(f"  📐 Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
+                        logger.info(f"[MEASURE] Only one significant cluster: {xheight_mm:.3f}mm ({xheight_count} chars)")
+                        logger.info(f"[MEASURE] Available peaks (top 5): {[(round(h, 3), c) for h, c in peaks_by_count[:5]]}")
                 
                 if clp_threshold_mm > 0:
-                    logger.info(f"  📐 CLP threshold={clp_threshold_mm}mm (used for compliance check only, NOT for peak selection)")
+                    logger.info(f"[MEASURE] CLP threshold={clp_threshold_mm}mm (used for compliance check only, NOT for peak selection)")
             
             if measurement_approach == 'single-peak' and len(peaks) == 1:
                 # Single peak — could be all-caps OR all-lowercase
@@ -2418,13 +2426,13 @@ If no clear number is visible, return 0."""
                     capheight_mm = peak_h
                     xheight_mm = peak_h * 0.70  # Typical cap-to-x-height ratio for sans-serif
                     measurement_approach = 'all-caps-estimated'
-                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (>1.7mm) — likely all-caps, estimating x-height = {xheight_mm:.3f}mm (70% ratio)")
+                    logger.info(f"[MEASURE] Single peak {peak_h:.3f}mm (>1.7mm) — likely all-caps, estimating x-height = {xheight_mm:.3f}mm (70% ratio)")
                 else:
                     # Likely all-lowercase or small font
                     xheight_mm = peak_h
                     capheight_mm = peak_h / 0.70  # Estimate cap-height for spacing calc
                     measurement_approach = 'single-peak-lowercase'
-                    logger.info(f"  📐 Single peak {peak_h:.3f}mm (≤1.7mm) — treating as x-height")
+                    logger.info(f"[MEASURE] Single peak {peak_h:.3f}mm (≤1.7mm) — treating as x-height")
             
             if measurement_approach == 'single-peak' and len(peaks) == 0:
                 # No clear peaks (very uniform or too few chars) — fall back to median
@@ -2442,12 +2450,12 @@ If no clear number is visible, return 0."""
                 vector_xheight = sorted([p[0] for p in peaks[:2]])[0] if len(peaks) >= 2 else peaks[0][0]
                 disagreement_pct = abs(text_xheight_mm - vector_xheight) / text_xheight_mm if text_xheight_mm > 0 else 0
                 if disagreement_pct > 0.15:
-                    logger.error(f"  ❌ CROSS-VALIDATION FAILED: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
+                    logger.error(f"ERROR: CROSS-VALIDATION FAILED: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
                     logger.error(f"     This suggests measurement instability — recommend human review")
                 elif disagreement_pct > 0.05:
-                    logger.warning(f"  ⚠️  Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) differ by {disagreement_pct:.0%}")
+                    logger.warning(f"WARNING: Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) differ by {disagreement_pct:.0%}")
                 else:
-                    logger.info(f"  ✓ Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
+                    logger.info(f"✓ Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
             
             # ================================================================
             # LINE SPACING (CLP): Visible gap between lines
@@ -2508,17 +2516,17 @@ If no clear number is visible, return 0."""
                 
                 center_to_center_mm = statistics.median(filtered_spacings)
                 
-                logger.info(f"  📐 Raw spacings: {[round(s,2) for s in spacings]}")
-                logger.info(f"  📐 Filtered spacings ({len(filtered_spacings)}/{len(spacings)}): {[round(s,2) for s in sorted(filtered_spacings)]}")
+                logger.info(f"[MEASURE] Raw spacings: {[round(s,2) for s in spacings]}")
+                logger.info(f"[MEASURE] Filtered spacings ({len(filtered_spacings)}/{len(spacings)}): {[round(s,2) for s in sorted(filtered_spacings)]}")
                 
                 # CLP line gap = center-to-center minus x_height (the reported font_size_mm)
                 # font_size_mm is always x-height, whether measured directly or derived from cap-height
                 # This was SETTLED: gap = c2c - x_height, NOT c2c - cap_height
                 line_distance_mm = max(0, center_to_center_mm - font_size_mm)
                 
-                logger.info(f"  📐 Center-to-center: {center_to_center_mm:.3f}mm")
-                logger.info(f"  📐 CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} (x-height) = {line_distance_mm:.3f}mm")
-                logger.info(f"  📐 Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
+                logger.info(f"[MEASURE] Center-to-center: {center_to_center_mm:.3f}mm")
+                logger.info(f"[MEASURE] CLP line gap: {center_to_center_mm:.3f} - {font_size_mm:.3f} (x-height) = {line_distance_mm:.3f}mm")
+                logger.info(f"[MEASURE] Body text line spacings (c2c): {[round(s,2) for s in spacings]}")
             elif len(line_y_centers_mm) >= 2:
                 spacings = [line_y_centers_mm[i+1] - line_y_centers_mm[i] 
                            for i in range(len(line_y_centers_mm) - 1)]
@@ -2537,7 +2545,7 @@ If no clear number is visible, return 0."""
                 font_size_mm *= vertical_scale
                 median_font_mm *= vertical_scale
                 line_distance_mm *= vertical_scale
-                logger.info(f"  📏 Vertical scale {vertical_scale:.4f} applied:")
+                logger.info(f"[SCALE] Vertical scale {vertical_scale:.4f} applied:")
                 logger.info(f"     Font: {font_size_mm_raw:.3f}mm → {font_size_mm:.3f}mm")
                 logger.info(f"     Line gap: {line_distance_mm_raw:.3f}mm → {line_distance_mm:.3f}mm")
             
@@ -2641,10 +2649,10 @@ If no clear number is visible, return 0."""
             self.calibration.is_calibrated = True
             self.calibration.locked_dpi = true_dpi  # Lock DPI after calibration
             
-            logger.info(f"  ✓ PDF vector calibration: {len(horiz_lines)} lines found, reference={physical_mm:.2f}mm")
-            logger.info(f"  ✓ Scale ratio: {scale_ratio:.4f} (1.0 = PDF is 1:1 physical)")
-            logger.info(f"  ✓ Calibrated DPI: {true_dpi} DPI ({self.calibration.dpmm:.2f} px/mm)")
-            logger.info(f"  🔒 Locking DPI at {true_dpi}")
+            logger.info(f"✓ PDF vector calibration: {len(horiz_lines)} lines found, reference={physical_mm:.2f}mm")
+            logger.info(f"✓ Scale ratio: {scale_ratio:.4f} (1.0 = PDF is 1:1 physical)")
+            logger.info(f"✓ Calibrated DPI: {true_dpi} DPI ({self.calibration.dpmm:.2f} px/mm)")
+            logger.info(f"[LOCK] Locking DPI at {true_dpi}")
             
             # Cache this DPI for future runs of the same PDF
             if hasattr(self, '_pdf_hash') and self._pdf_hash:
@@ -2763,13 +2771,13 @@ If no measurement lines found, return empty array.
                 best_line = max(lines, key=lambda l: 
                     ((l["end_point"]["x"] - l["start_point"]["x"])**2 + 
                      (l["end_point"]["y"] - l["start_point"]["y"])**2)**0.5)
-                logger.info(f"  ✓ Selecting longest: {best_line['value_mm']}mm")
+                logger.info(f"✓ Selecting longest: {best_line['value_mm']}mm")
                 
                 line_data = best_line
                 px_distance = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
                               (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
                 
-                logger.info(f"  📏 Measurement: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px")
+                logger.info(f"[SCALE] Measurement: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance:.1f}px")
                 
                 # CRITICAL: Scale coordinates back to original image space
                 # Gemini returns coordinates in its internally-resized space
@@ -2782,7 +2790,7 @@ If no measurement lines found, return empty array.
                     line_data["end_point"]["y"] = int(round(line_data["end_point"]["y"] * scale_factor))
                     px_distance_scaled = ((line_data["end_point"]["x"] - line_data["start_point"]["x"])**2 + 
                                          (line_data["end_point"]["y"] - line_data["start_point"]["y"])**2)**0.5
-                    logger.info(f"  ✓ Scaled measurement line: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance_scaled:.1f}px, value={line_data['value_mm']}mm")
+                    logger.info(f"✓ Scaled measurement line: start=({line_data['start_point']['x']}, {line_data['start_point']['y']}), end=({line_data['end_point']['x']}, {line_data['end_point']['y']}), distance={px_distance_scaled:.1f}px, value={line_data['value_mm']}mm")
                 
                 line = MeasurementLine(
                     start_point=Point(**line_data["start_point"]),
@@ -2795,7 +2803,7 @@ If no measurement lines found, return empty array.
                     # SANITY CHECK: Detect implausible calibration results
                     # Typical label scans: 150-600 DPI. Outside this range suggests error.
                     if self.calibration.true_dpi < 50 or self.calibration.true_dpi > 1200:
-                        logger.warning(f"  ⚠️  Calibrated DPI ({self.calibration.true_dpi}) is outside expected range (50-1200)")
+                        logger.warning(f"WARNING: Calibrated DPI ({self.calibration.true_dpi}) is outside expected range (50-1200)")
                         logger.warning(f"      This might indicate a failed calibration. Consider manual review.")
                         logger.warning(f"      Measurement line: {line.value_mm}mm across {((line.end_point.x - line.start_point.x)**2 + (line.end_point.y - line.start_point.y)**2)**0.5:.1f}px")
                     
@@ -2854,7 +2862,7 @@ If no measurement lines found, return empty array.
             regions = response.get("regions", [])
             
             # Denormalize box_2d format [ymin, xmin, ymax, xmax] to pixel coordinates
-            logger.info(f"  📐 Denormalizing {len(regions)} box_2d bounding boxes...")
+            logger.info(f"[MEASURE] Denormalizing {len(regions)} box_2d bounding boxes...")
             for region in regions:
                 if "box_2d" in region:
                     box_2d = region.pop("box_2d")
@@ -2981,9 +2989,9 @@ If no measurement lines found, return empty array.
             
             out_rect = refined.get('rect', {})
             if out_rect:
-                logger.info(f"  ✓ Refined: {label} ({out_rect['xmin']},{out_rect['ymin']})-({out_rect['xmax']},{out_rect['ymax']}) irregular={refined['has_irregular_shape']}")
+                logger.info(f"✓ Refined: {label} ({out_rect['xmin']},{out_rect['ymin']})-({out_rect['xmax']},{out_rect['ymax']}) irregular={refined['has_irregular_shape']}")
             else:
-                logger.info(f"  ✓ Refined: {label} (no rect) irregular={refined['has_irregular_shape']}")
+                logger.info(f"✓ Refined: {label} (no rect) irregular={refined['has_irregular_shape']}")
             return refined
             
         except (APIError, json.JSONDecodeError, KeyError) as e:
@@ -3097,7 +3105,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 line_dist_mm = measurements['line_distance_mm']
                 meas_conf = measurements['measurement_confidence']
                 
-                logger.info(f"  ✓ PDF Vector measurements (no correction factor — x-height is CLP metric):")
+                logger.info(f"✓ PDF Vector measurements (no correction factor — x-height is CLP metric):")
                 logger.info(f"    Font (x-height)={font_mm:.2f}mm, Line gap={line_dist_mm:.2f}mm")
                 logger.info(f"    BG={measurements['background_color']}, Contrast={measurements['contrast_assessment']}")
                 
@@ -3223,7 +3231,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             try:
                 estimated_xheight_mm = float(measurements.get('estimated_xheight_mm') or 0)
                 if estimated_xheight_mm > 0:
-                    logger.info(f"  ℹ️  Gemini provided estimated x-height: {estimated_xheight_mm:.4f}mm")
+                    logger.info(f"[INFO] Gemini provided estimated x-height: {estimated_xheight_mm:.4f}mm")
             except (ValueError, TypeError):
                 estimated_xheight_mm = None
             
@@ -3266,7 +3274,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 # BEST: Use Gemini's explicit estimate (already includes 0.70× correction)
                 font_mm = estimated_xheight_mm
                 correction = 1.0  # Already corrected by Gemini
-                logger.info(f"  ✓ Using Gemini's estimated x-height: {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm")
+                logger.info(f"✓ Using Gemini's estimated x-height: {font_mm_before_correction:.4f}mm → {font_mm:.4f}mm")
             else:
                 # FALLBACK: Apply automatic correction based on method + confidence
                 correction = get_correction_factor(meas_conf_raw, measurement_method)
@@ -3280,14 +3288,14 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             measurements['correction_factor_applied'] = correction
             
             if correction == 1.0 and not estimated_xheight_mm:
-                logger.info(f"  ✓ X-height measured (no correction needed): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
+                logger.info(f"✓ X-height measured (no correction needed): {font_mm:.4f}mm (confidence: {meas_conf_raw:.0%})")
             
             # Get actual cropped image dimensions for logging
             cropped_w, cropped_h = cropped_image.width, cropped_image.height
             
             # DEBUG: Log all values for troubleshooting
             measurement_method = measurements.get('measurement_method', 'x-height')
-            logger.info(f"  ✓ Gemini measurements (X-HEIGHT OPTIMIZED):")
+            logger.info(f"✓ Gemini measurements (X-HEIGHT OPTIMIZED):")
             logger.info(f"    [CALIBRATION] DPI={self.calibration.true_dpi}, dpmm={self.calibration.dpmm:.4f}, calibrated={self.calibration.is_calibrated}")
             logger.info(f"    [CROP] {cropped_w}×{cropped_h}px")
             logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm (method: {measurement_method})")
@@ -3309,7 +3317,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             is_unreadable = (font_mm < 0.1 and line_dist_mm < 0.1) or meas_conf < 0.1
             
             if is_unreadable:
-                logger.warning(f"  ⚠️  Unreadable region '{region_label}' - measurements indicate no readable text (font={font_mm:.2f}mm, confidence={meas_conf:.0%})")
+                logger.warning(f"WARNING: Unreadable region '{region_label}' - measurements indicate no readable text (font={font_mm:.2f}mm, confidence={meas_conf:.0%})")
                 return {
                     "measurements": measurements,
                     "rule_results": {
@@ -3326,14 +3334,14 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             rule_results = validate_measurements_against_rules(measurements, package_size_ml, is_inner_packaging=is_inner_packaging)
             
             # Log rule application for audit trail
-            logger.info(f"  ✓ Rule validation:")
+            logger.info(f"✓ Rule validation:")
             logger.info(f"    Rule 1 (Font size): {rule_results['rule_1_font_size']['status']} - {rule_results['rule_1_font_size']['detail']}")
             logger.info(f"    Rule 2 (Line distance): {rule_results['rule_2_line_distance']['status']} - {rule_results['rule_2_line_distance']['detail']}")
             logger.info(f"    Rule 3 (Contrast): {rule_results['rule_3_background_contrast']['status']} - {rule_results['rule_3_background_contrast']['detail']}")
             logger.info(f"    Overall: {rule_results['overall_compliance']}")
             
             val_time = time_module.time() - val_start
-            logger.info(f"  ✓ Stage 3 complete for '{region_label}' ({val_time:.1f}s)")
+            logger.info(f"✓ Stage 3 complete for '{region_label}' ({val_time:.1f}s)")
             
             return {
                 "measurements": measurements,
@@ -3345,7 +3353,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             
         except json.JSONDecodeError as e:
             val_time = time_module.time() - val_start
-            logger.error(f"  ❌ JSON parse error in Stage 3 for '{region_label}' ({val_time:.1f}s): {e}")
+            logger.error(f"ERROR: JSON parse error in Stage 3 for '{region_label}' ({val_time:.1f}s): {e}")
             logger.error(f"     Response preview: {response_text[:300] if 'response_text' in locals() else 'N/A'}")
             # Return safe error structure (won't crash downstream)
             return {
@@ -3357,7 +3365,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             }
         except Exception as e:
             val_time = time_module.time() - val_start
-            logger.error(f"  ❌ CLP validation failed for '{region_label}' ({val_time:.1f}s): {type(e).__name__}: {e}")
+            logger.error(f"ERROR: CLP validation failed for '{region_label}' ({val_time:.1f}s): {type(e).__name__}: {e}")
             # Return safe error structure (won't crash downstream)
             return {
                 "measurements": {},
@@ -3475,7 +3483,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                     pdf_hash = hashlib.sha256(f.read()).hexdigest()
                 cached_dpi = self.calibration.lookup_cached_dpi(pdf_hash)
                 if cached_dpi:
-                    logger.info(f"  ✓ Using cached DPI: {cached_dpi} DPI")
+                    logger.info(f"✓ Using cached DPI: {cached_dpi} DPI")
                     self.calibration.true_dpi = cached_dpi
                     self.calibration.dpmm = cached_dpi / 25.4
                     self.calibration.is_calibrated = True
@@ -3557,7 +3565,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                     continue
                 
                 cropped = image.crop((xmin, ymin, xmax, ymax))
-                logger.info(f"  ✓ Cropped '{region['label']}': {cropped.width}×{cropped.height}px")
+                logger.info(f"✓ Cropped '{region['label']}': {cropped.width}×{cropped.height}px")
                 
                 # Pass detected package size and inner packaging flag for correct rule application
                 # Inner packaging exemption applies to ≤10ml (font can be smaller if legible)
@@ -3730,7 +3738,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 
                 # Log result and invoke callback
                 if result.success:
-                    logger.info(f"  ✓ [{idx+1}/{total}] {result.path}: {len(result.parts)} parts in {result.elapsed_seconds:.1f}s")
+                    logger.info(f"✓ [{idx+1}/{total}] {result.path}: {len(result.parts)} parts in {result.elapsed_seconds:.1f}s")
                 else:
                     logger.error(f"  ✗ [{idx+1}/{total}] {result.path}: FAILED in {result.elapsed_seconds:.1f}s")
                 
@@ -3977,13 +3985,13 @@ def analyze_image_file(image_path: str, project_id: str) -> Tuple[LabelAnalyzer,
         
         if raw_dpi and raw_dpi >= 150:
             image_dpi = raw_dpi
-            logger.info(f"  ✓ Extracted DPI from image metadata: {image_dpi} DPI")
+            logger.info(f"✓ Extracted DPI from image metadata: {image_dpi} DPI")
         elif raw_dpi:
             logger.info(f"  ⚠️  Ignoring low metadata DPI ({raw_dpi}) - likely JFIF default, using {image_dpi} DPI")
         else:
-            logger.info(f"  ℹ️  No valid DPI in image metadata, using default: {image_dpi} DPI")
+            logger.info(f"[INFO] No valid DPI in image metadata, using default: {image_dpi} DPI")
     else:
-        logger.info(f"  ℹ️  No DPI in image metadata, using default: {image_dpi} DPI")
+        logger.info(f"[INFO] No DPI in image metadata, using default: {image_dpi} DPI")
     
     image_data = image_to_base64(img)
     
