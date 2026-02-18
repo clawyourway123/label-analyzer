@@ -55,38 +55,6 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# MAGIC NUMBERS → NAMED CONSTANTS
-# ============================================================================
-# Measurement & conversion constants
-PT_TO_MM = 25.4 / 72  # 1 point = 25.4mm / 72 = 0.3528mm
-MM_TO_PT = 72 / 25.4  # Inverse conversion
-PT_PER_INCH = 72
-
-# Height thresholds and ratios
-CAP_HEIGHT_TO_X_HEIGHT_RATIO = 0.85  # Typical ratio for deriving x-height from cap-height
-X_HEIGHT_TOLERANCE_MM = 0.05  # Tolerance for merging peaks (±0.05mm)
-BIMODAL_MIN_SEPARATION_MM = 0.25  # Minimum separation for valid bimodal pair
-BIMODAL_RATIO_MIN = 0.60  # Min height ratio for x-height/cap-height pair
-BIMODAL_RATIO_MAX = 0.88  # Max height ratio for x-height/cap-height pair
-PEAK_SIGNIFICANCE_THRESHOLD = 0.15  # Peaks with <15% of top peak are filtered
-PEAK_HEIGHT_MIN_MM = 0.5  # Minimum plausible peak height
-PEAK_HEIGHT_MAX_MM = 4.0  # Maximum plausible peak height (excludes noise)
-
-# Clustering
-HEIGHT_CLUSTER_BIN_MM = 0.02  # Histogram bin size for height clustering
-MIN_CHARS_IN_CLUSTER = 3  # Minimum characters to define a valid cluster
-
-# Confidence & area fractions
-MIN_AREA_FRACTION_THRESHOLD = 0.005  # Regions <0.5% of image are suspect
-MAX_AREA_FRACTION_THRESHOLD = 0.85  # Regions >85% of image are suspect
-MIN_CONFIDENCE_FOR_VALID_MEASUREMENT = 0.5  # Skip validation if confidence < this
-
-# Validation rules
-INNER_PACKAGING_SIZE_ML = 10  # Threshold for inner packaging exemption
-MIN_FONT_SIZE_FALLBACK_ML = 5000  # Safe default when size detection fails (strictest)
-
-
-# ============================================================================
 # DATA MODELS
 # ============================================================================
 
@@ -142,6 +110,17 @@ class EnsembleConfidence:
           relative to the full image (penalizes tiny or full-image regions).
         - refinement_agreement: How much the refined bbox agrees with the
           rough bbox (high IoU = both stages agree = more trustworthy).
+
+    Usage::
+
+        scorer = EnsembleConfidence()
+        score = scorer.score(
+            model_confidence=0.85,
+            rough_rect={"xmin": 10, "ymin": 10, "xmax": 200, "ymax": 200},
+            refined_rect={"xmin": 12, "ymin": 8, "xmax": 198, "ymax": 205},
+            image_width=1000,
+            image_height=800,
+        )
     """
 
     # Default weights (sum needn't be 1; they are normalised internally).
@@ -150,6 +129,11 @@ class EnsembleConfidence:
         "geometric_plausibility": 1.0,
         "refinement_agreement": 1.5,
     }
+
+    # Regions smaller than this fraction of the image are suspect.
+    MIN_AREA_FRACTION = 0.005
+    # Regions larger than this fraction are suspect (probably whole-image).
+    MAX_AREA_FRACTION = 0.85
 
     def __init__(self, weights: Optional[Dict[str, float]] = None):
         self.weights = weights or dict(self.DEFAULT_WEIGHTS)
@@ -181,12 +165,12 @@ class EnsembleConfidence:
         image_area = max(1, image_width * image_height)
         frac = area / image_area
 
-        if frac < MIN_AREA_FRACTION_THRESHOLD:
+        if frac < self.MIN_AREA_FRACTION:
             # Very small — linearly ramp from 0 at 0% to 1 at threshold
-            return max(0.0, frac / MIN_AREA_FRACTION_THRESHOLD)
-        if frac > MAX_AREA_FRACTION_THRESHOLD:
+            return max(0.0, frac / self.MIN_AREA_FRACTION)
+        if frac > self.MAX_AREA_FRACTION:
             # Covers almost everything — ramp down
-            return max(0.0, (1.0 - frac) / (1.0 - MAX_AREA_FRACTION_THRESHOLD))
+            return max(0.0, (1.0 - frac) / (1.0 - self.MAX_AREA_FRACTION))
         return 1.0
 
     def refinement_agreement(self, rough_rect: Optional[Dict], refined_rect: Dict) -> float:
@@ -862,87 +846,6 @@ def validate_measurements_against_rules(metrics: Dict, package_size_ml: int = 50
 
 
 # ============================================================================
-# BIMODAL PEAK DETECTION (SIMPLIFIED)
-# ============================================================================
-
-def detect_bimodal_peaks(
-    peaks: List[Tuple[float, int]], 
-    clp_threshold_mm: float = 0
-) -> Tuple[float, float, str]:
-    """Detect x-height and cap-height from bimodal distribution.
-    
-    Args:
-        peaks: List of (height_mm, character_count) tuples, sorted by count
-        clp_threshold_mm: Expected x-height (for disambiguation)
-        
-    Returns:
-        Tuple of (x_height_mm, cap_height_mm, approach_name)
-    """
-    if not peaks:
-        return 0.0, 0.0, "empty"
-    
-    # Single peak: ambiguous without text layer
-    if len(peaks) == 1:
-        h = peaks[0][0]
-        if h > 1.7:  # Likely all-caps
-            return h * CAP_HEIGHT_TO_X_HEIGHT_RATIO, h, "single-peak-allcaps"
-        else:  # Likely lowercase
-            return h, h / CAP_HEIGHT_TO_X_HEIGHT_RATIO, "single-peak-mixed"
-    
-    # Multiple peaks: find bimodal pair
-    peaks_by_height = sorted(peaks, key=lambda x: x[0])
-    best_pair = None
-    best_score = 0
-    
-    for i in range(len(peaks_by_height)):
-        for j in range(i + 1, len(peaks_by_height)):
-            lo_h, lo_c = peaks_by_height[i]
-            hi_h, hi_c = peaks_by_height[j]
-            separation = hi_h - lo_h
-            ratio = lo_h / hi_h if hi_h > 0 else 0
-            combined = lo_c + hi_c
-            
-            # Valid bimodal pair check
-            if (separation > BIMODAL_MIN_SEPARATION_MM and 
-                BIMODAL_RATIO_MIN <= ratio <= BIMODAL_RATIO_MAX and
-                combined > best_score):
-                best_pair = (lo_h, hi_h, lo_c, hi_c)
-                best_score = combined
-    
-    if best_pair:
-        lo_h, hi_h, lo_c, hi_c = best_pair
-        
-        # Disambiguate: mixed-case (lower=x-height) or all-caps (upper=cap-height)?
-        is_all_caps = False
-        if clp_threshold_mm > 0:
-            # Use threshold as hint
-            dist_lower = abs(lo_h - clp_threshold_mm)
-            derived_upper = hi_h * CAP_HEIGHT_TO_X_HEIGHT_RATIO
-            dist_upper_derived = abs(derived_upper - clp_threshold_mm)
-            
-            if dist_lower < X_HEIGHT_TOLERANCE_MM:
-                is_all_caps = False  # Lower peak is x-height
-            elif dist_upper_derived < X_HEIGHT_TOLERANCE_MM:
-                is_all_caps = True  # Upper peak is cap-height
-            else:
-                is_all_caps = (hi_c >= lo_c)  # Fall back to char count
-        else:
-            is_all_caps = (hi_c > lo_c)  # More chars in upper = all-caps
-        
-        if is_all_caps:
-            return hi_h * CAP_HEIGHT_TO_X_HEIGHT_RATIO, hi_h, "bimodal-allcaps"
-        else:
-            return lo_h, hi_h, "bimodal-mixed"
-    
-    # No bimodal pair: use most frequent peak
-    xheight = peaks[0][0]
-    if xheight > 1.7:
-        return xheight * CAP_HEIGHT_TO_X_HEIGHT_RATIO, xheight, "single-peak-allcaps"
-    else:
-        return xheight, xheight / CAP_HEIGHT_TO_X_HEIGHT_RATIO, "single-peak-mixed"
-
-
-# ============================================================================
 # CUSTOM EXCEPTIONS
 # ============================================================================
 
@@ -1581,11 +1484,11 @@ class LabelAnalyzer:
                 if item[0] == 'l':
                     p1, p2 = item[1], item[2]
                     if abs(p1.y - p2.y) < 2:  # horizontal
-                        length_mm = abs(p2.x - p1.x)  * PT_TO_MM
+                        length_mm = abs(p2.x - p1.x) / 72 * 25.4
                         if length_mm > 50:
                             h_lines.append((length_mm, p1.y, min(p1.x, p2.x), max(p1.x, p2.x)))
                     elif abs(p1.x - p2.x) < 2:  # vertical
-                        length_mm = abs(p2.y - p1.y)  * PT_TO_MM
+                        length_mm = abs(p2.y - p1.y) / 72 * 25.4
                         if length_mm > 50:
                             v_lines.append((length_mm, p1.x, min(p1.y, p2.y), max(p1.y, p2.y)))
         
@@ -1744,11 +1647,11 @@ If no clear number is visible, return 0."""
                         if item[0] == 'l':
                             p1, p2 = item[1], item[2]
                             if abs(p1.y - p2.y) < 2:
-                                length = abs(p2.x - p1.x)  * PT_TO_MM
+                                length = abs(p2.x - p1.x) / 72 * 25.4
                                 if length > 50:
                                     h_lines_mm.append(length)
                             elif abs(p1.x - p2.x) < 2:
-                                length = abs(p2.y - p1.y)  * PT_TO_MM
+                                length = abs(p2.y - p1.y) / 72 * 25.4
                                 if length > 50:
                                     v_lines_mm.append(length)
                 
@@ -1900,14 +1803,14 @@ If no clear number is visible, return 0."""
                     # Use maximum stroke width among paths in this character
                     stroke_w_pt = max([p.get('stroke_w', 0) or 0 for p in ch]) if ch else 0
                     # Visual height = bbox height + full stroke width
-                    h_mm = (bot - top + stroke_w_pt)  * PT_TO_MM
+                    h_mm = (bot - top + stroke_w_pt) / 72 * 25.4
                     char_heights_mm.append(h_mm)
                 
                 line_char_heights.append(char_heights_mm)
                 
                 # Line y-center for spacing calculation
                 line_y = statistics.median([p['y_center'] for p in line_paths])
-                line_y_centers_mm.append(line_y  * PT_TO_MM)
+                line_y_centers_mm.append(line_y / 72 * 25.4)
             
             # Flatten all character heights
             all_char_heights_mm = [h for line_h in line_char_heights for h in line_h]
@@ -2057,13 +1960,13 @@ If no clear number is visible, return 0."""
                 doc2.close()
                 
                 if len(xheight_pts) >= 3:  # Lowered from 5: even 3 chars gives reliable median
-                    text_xheight_mm = statistics.median(xheight_pts)  * PT_TO_MM
-                    bbox_xheight_mm = statistics.median(xheight_bbox_pts)  * PT_TO_MM
+                    text_xheight_mm = statistics.median(xheight_pts) / 72 * 25.4
+                    bbox_xheight_mm = statistics.median(xheight_bbox_pts) / 72 * 25.4
                     logger.info(f"  📐 TEXT-BASED x-height: {text_xheight_mm:.3f}mm (from {len(xheight_pts)} lowercase chars, method=origin-based)")
                     if abs(text_xheight_mm - bbox_xheight_mm) > 0.01:
                         logger.info(f"  📐 TEXT-BASED bbox x-height would be: {bbox_xheight_mm:.3f}mm (origin-based saved {bbox_xheight_mm - text_xheight_mm:.3f}mm)")
                     if len(cap_pts) >= 3:
-                        text_capheight_mm = statistics.median(cap_pts)  * PT_TO_MM
+                        text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
                         logger.info(f"  📐 TEXT-BASED cap-height: {text_capheight_mm:.3f}mm (from {len(cap_pts)} uppercase chars)")
                         logger.info(f"  📐 TEXT-BASED cap/x ratio: {text_capheight_mm/text_xheight_mm:.3f}")
                     
@@ -2099,13 +2002,13 @@ If no clear number is visible, return 0."""
                                         # glyph_bbox is in font units (normalized to font size 1)
                                         # Actual x-height = glyph_bbox.height * font_size_pt
                                         glyph_xheight_pt = x_glyph_bbox.height * font_size_pt
-                                        glyph_xheight_mm = glyph_xheight_pt  * PT_TO_MM
+                                        glyph_xheight_mm = glyph_xheight_pt / 72 * 25.4
                                         logger.info(f"  📐 GLYPH-BASED x-height: {glyph_xheight_mm:.3f}mm (font={font_name}, size={font_size_pt}pt, glyph_ratio={x_glyph_bbox.height:.4f})")
                                         
                                         # Also get cap-height from 'X' glyph
                                         cap_glyph_bbox = font_obj.glyph_bbox(ord('X'))
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
-                                            glyph_capheight_mm = cap_glyph_bbox.height * font_size_pt  * PT_TO_MM
+                                            glyph_capheight_mm = cap_glyph_bbox.height * font_size_pt / 72 * 25.4
                                             logger.info(f"  📐 GLYPH-BASED cap-height: {glyph_capheight_mm:.3f}mm (glyph_ratio={cap_glyph_bbox.height:.4f})")
                                         
                                         # Compare with origin-based measurement
@@ -2133,7 +2036,7 @@ If no clear number is visible, return 0."""
                 elif len(cap_pts) >= 3:
                     # ALL-CAPS TEXT: No lowercase x-height chars, but we have cap-height
                     # Derive x-height from cap-height using typical ratio
-                    text_capheight_mm = statistics.median(cap_pts)  * PT_TO_MM
+                    text_capheight_mm = statistics.median(cap_pts) / 72 * 25.4
                     
                     # Try glyph-based x-height from embedded font metrics (gold standard)
                     glyph_derived = False
@@ -2164,7 +2067,7 @@ If no clear number is visible, return 0."""
                     
                     if not glyph_derived:
                         # Fallback: use 0.85 ratio (typical for CLP label fonts)
-                        text_xheight_mm = text_capheight_mm  * CAP_HEIGHT_TO_X_HEIGHT_RATIO
+                        text_xheight_mm = text_capheight_mm * 0.85
                         logger.info(f"  📐 ALL-CAPS: Derived x-height from cap-height: {text_capheight_mm:.3f}mm × 0.85 = {text_xheight_mm:.3f}mm (no glyph metrics)")
                     
                     logger.info(f"  📐 ALL-CAPS text detected: {len(cap_pts)} cap chars, {len(xheight_pts)} x-height chars")
@@ -2323,7 +2226,7 @@ If no clear number is visible, return 0."""
                         #
                         # We can't use text layer (PDF has no text), so use CLP threshold as hint:
                         # - If lower_peak is VERY close to threshold (< 0.05mm), it IS x-height
-                        # - If upper_peak  * CAP_HEIGHT_TO_X_HEIGHT_RATIO is VERY close to threshold, upper IS cap-height
+                        # - If upper_peak * 0.85 is VERY close to threshold, upper IS cap-height
                         # - Otherwise, use peak counts (more chars = body text)
                         
                         is_all_caps = False
@@ -2331,7 +2234,7 @@ If no clear number is visible, return 0."""
                         
                         if clp_threshold_mm > 0:
                             dist_lower = abs(lo_h - clp_threshold_mm)
-                            derived_from_upper = hi_h  * CAP_HEIGHT_TO_X_HEIGHT_RATIO
+                            derived_from_upper = hi_h * 0.85
                             dist_upper_derived = abs(derived_from_upper - clp_threshold_mm)
                             
                             # If lower peak is much closer to threshold, it IS x-height (mixed-case)
@@ -2361,7 +2264,7 @@ If no clear number is visible, return 0."""
                         if is_all_caps:
                             # Upper peak is body text cap-height; derive x-height
                             capheight_mm = hi_h
-                            xheight_mm = hi_h  * CAP_HEIGHT_TO_X_HEIGHT_RATIO
+                            xheight_mm = hi_h * 0.85
                             xheight_count = hi_c
                             measurement_approach = 'bimodal-allcaps-derived'
                             bimodal_found = True
@@ -2611,7 +2514,7 @@ If no clear number is visible, return 0."""
                         if abs(p1.y - p2.y) < 2:  # roughly horizontal
                             length_pts = abs(p2.x - p1.x)
                             if length_pts > 50:  # significant length
-                                length_mm = length_pts  * PT_TO_MM
+                                length_mm = length_pts / 72 * 25.4
                                 horiz_lines.append((length_pts, length_mm))
             
             if not horiz_lines:
@@ -2626,7 +2529,7 @@ If no clear number is visible, return 0."""
             # Find lines matching most common length
             matching = [l for l in horiz_lines if abs(l[0] - most_common_length) < 2]
             avg_pts = sum(l[0] for l in matching) / len(matching)
-            physical_mm = avg_pts  * PT_TO_MM
+            physical_mm = avg_pts / 72 * 25.4
             
             # Calculate scale: PDF points per mm
             pts_per_mm = avg_pts / physical_mm
