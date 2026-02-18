@@ -1,104 +1,82 @@
 # Opus Implementation Notes
-**Cycle:** Tuesday, February 17th, 2026 — 3:38 PM PST  
-**Git HEAD:** f7fbb4d  
-**Implementer:** Opus (Code Implementer & Researcher)
+**Cycle:** Tuesday, February 17th, 2026 — 3:52 PM PST  
+**Git HEAD:** 0e2988b  
+**Implementer:** Opus
 
 ---
 
-## ⚠️ CRITICAL: Sonnet's Gap Fix Is WRONG DIRECTION
+## ✅ CHANGES IMPLEMENTED THIS CYCLE
 
-Sonnet proposes changing gap calc from `c2c - font_size_mm` to `c2c - capheight_mm`. **This would make the 5000ml gap measurement WORSE, not better.** Here's the math:
+### 1. Always Prefer Glyph-Based X-Height (Sonnet Fix #2, Option 1)
+**Commit:** 0e2988b
 
-### Current 5000ml measurements:
-- font_size_mm (x-height) = 1.91mm (expected 1.78mm)
-- line_distance_mm (gap) = 1.92mm (expected 2.01mm)
-- center_to_center = 1.91 + 1.92 = **3.83mm**
+Removed the 5% threshold gate. Now when glyph-based measurement is available, it's **always** used over origin-based.
 
-### If we use cap-height instead (Sonnet's fix):
-- capheight ≈ 1.91 / 0.70 = ~2.73mm (or measured directly)
-- gap = 3.83 - 2.73 = **1.10mm** ← MUCH WORSE (expected 2.01mm!)
+**Rationale:** Glyph bbox comes from the font designer's actual outline data — it's mathematically exact. The origin-based method measures `baseline_y - bbox_top`, which still includes bbox padding from PyMuPDF's text extraction. The 5% threshold was letting padded measurements slip through on the 5000ml label.
 
-### The REAL fix — correct the font measurement:
-- If font_size_mm were correct at 1.78mm:
-- gap = 3.83 - 1.78 = **2.05mm** ← Very close to expected 2.01mm!
+**Risk:** Low. If the glyph extraction succeeds, the data is authoritative. The only risk is if `glyph_bbox()` returns wrong values for subset fonts, but PyMuPDF handles this well — it returns None/zero for missing glyphs, which we already check.
 
-**Conclusion:** The gap error is a DOWNSTREAM EFFECT of the font over-measurement. Fix the font, and the gap fixes itself. The formula `gap = c2c - x_height` is correct for CLP.
+### 2. Glyph Extraction Failure Alerting (Sonnet Fix #4)
+Changed `logger.debug` → `logger.warning` for glyph extraction failures so they're visible in normal log output.
 
-### CLP "distance between lines" — what it actually means:
-Per Bens Consulting (interpreting EU CLP 1272/2008): "you need to ensure there is enough empty space between the lowest part of a letter in the top line (like 'y') and the highest part of a letter in the line below it (like 'X')."
-
-This means the gap is measured from descender bottom to ascender/cap top. For center-to-center based calculation, the correct subtraction depends on what the "line height" is. Since CLP defines everything in terms of x-height, and the 120% rule is `gap ≥ 120% of x-height`, using x-height in the subtraction is mathematically consistent when measuring body text lines. Using cap-height would only be correct if ALL lines are all-caps with no descenders.
+### 3. Cross-Validation Escalation (Sonnet Fix #3)
+- >15% disagreement: `logger.error` + human review recommendation  
+- 5-15% disagreement: `logger.warning`  
+- <5%: `logger.info` (agreement confirmed)
 
 ---
 
-## ✅ IMPLEMENTED: Glyph-Based X-Height Measurement (f7fbb4d)
+## 🔬 ANALYSIS
 
-### Problem
-The origin-based x-height measurement (`baseline_y - bbox_top`) has systematic over-measurement due to PyMuPDF char bbox padding above the glyph outline. For 5000ml: measures 1.91mm instead of expected 1.78mm (7.3% over).
+### Why This Should Fix 5000ml
 
-### Solution
-Added **glyph-based x-height measurement** using PyMuPDF's `Font.glyph_bbox()` API:
+The 5000ml label measures 1.91mm via origin-based but expected 1.78mm (+7.3% over). If the glyph-based measurement was available but not engaging due to the 5% threshold being borderline, removing the gate ensures we get the exact font metric.
 
-1. Extract the embedded font from the PDF via `doc.extract_font(xref)`
-2. Create a `fitz.Font(fontbuffer=...)` object
-3. Call `font.glyph_bbox(ord('x'))` to get the precise outline bbox
-4. Compute: `x_height = glyph_bbox.height × font_size_pt / 72 × 25.4`
+**Key question I can't verify without running:** Does glyph extraction actually succeed for the 5000ml PDF's font? If the font is a CIDFont or heavily subset, `extract_font()` might return no buffer, and we'd still fall back to origin-based. The new warning-level logging will make this immediately visible.
 
-This gives the **mathematically exact** x-height based on the font's design metrics, with zero bbox padding.
+### If Glyph Extraction Fails for 5000ml
 
-### How it works in the code:
-- Runs AFTER origin-based measurement succeeds (needs ≥3 x-height chars)
-- Cross-validates origin-based vs glyph-based measurements
-- If origin-based is >5% higher than glyph-based → prefers glyph (padding detected)
-- Also extracts glyph-based cap-height from 'X' glyph for consistency
-- Falls back gracefully if font extraction fails (subset fonts, CIDFonts, etc.)
+If next run still shows 1.91mm, it means glyph extraction is failing silently (now it'll warn). In that case, we should:
 
-### Expected impact:
-- 5000ml: font should drop from ~1.91mm toward ~1.78mm
-- 700ml: should remain ~1.20mm (already accurate, padding is minimal at small sizes)
-- Gap measurements will improve as a side effect of correct font measurement
+1. **Use `Font.ascender` property** as alternative — PyMuPDF exposes `font.ascender` which gives the ascender height relative to font size. Combined with `font.descender`, we can compute x-height as `1.0 - ascender_overshoot`. But this is less precise.
 
-### Risk:
-- Some PDFs use subset fonts where glyph extraction may fail → graceful fallback
-- CIDFont/Type3 fonts may not support glyph_bbox → graceful fallback
-- If the font is heavily hinted, glyph_bbox might differ from rendered size
+2. **Apply a correction factor to origin-based** — If we know origin-based consistently over-measures by ~7%, we could apply a font-size-dependent correction. But this is fragile.
+
+3. **Try multiple 'x' characters** — Instead of one `glyph_bbox(ord('x'))`, try 'o', 'e', 'a' and take the median. Some subset fonts include certain glyphs but not others.
+
+### Gap Measurement
+
+I agree with Sonnet: gap = c2c - x_height is correct per CLP. The 5000ml gap error (1.92mm vs 2.01mm expected) should improve as a downstream effect of fixing font measurement, since `line_distance_mm = max(0, center_to_center_mm - font_size_mm)`. Lower font_size_mm → higher gap.
+
+If font drops from 1.91→1.78, and c2c stays the same, gap would increase by ~0.13mm (from 1.92 to ~2.05mm), which is closer to the expected 2.01mm. ✅
 
 ---
 
-## 📚 Research Notes
+## 📋 NEXT CYCLE TODO
 
-### CLP Line Spacing — Two Interpretations (Unresolved)
-The CLP regulation says "distance between lines ≥ 120% of font size" but there are **two competing interpretations**:
-1. **Gap interpretation:** visible whitespace between lines ≥ 120% of x-height
-2. **Leading interpretation:** baseline-to-baseline distance ≥ 120% of full font body
-
-ECHA has not published definitive guidance yet (expected before summer 2026). Our code uses interpretation 1 (gap = c2c - x_height). This seems most consistent with the regulation text and industry practice.
-
-### PyMuPDF Font Metrics
-- `Font.ascender` / `Font.descender` — normalized values (relative to em square)
-- `Font.glyph_bbox(codepoint)` — precise outline bbox for a specific glyph
-- Default fallback values: ascender=0.8, descender=-0.2 (if font lacks OS/2 table)
-- Glyph bbox height for 'x' directly gives the x-height/em ratio
+1. **Run both labels** and check logs for glyph decision path
+2. If 5000ml still wrong → investigate `Font.ascender`/`Font.descender` as alternative metrics
+3. If 700ml regresses → add size-dependent logic (use glyph only when origin > glyph + epsilon)
+4. Consider adding `font.ascender` cross-validation as a third measurement source
 
 ---
 
-## 🎯 Next Steps for Sonnet
+## 🔍 RESEARCH NOTES
 
-1. **DO NOT implement the gap fix** (`c2c - capheight`). See math proof above — it makes things worse.
-2. **Review the glyph-based measurement** in commit f7fbb4d. Check edge cases:
-   - What if `extract_font()` returns None for subset fonts?
-   - What if `glyph_bbox()` returns a zero-height rect?
-   - Is the 5% threshold for preferring glyph-based appropriate?
-3. **Consider:** Should we ALWAYS prefer glyph-based when available, not just when origin-based is >5% higher?
-4. **Test mentally:** For 700ml (already accurate at 1.20mm), glyph-based should agree with origin-based (small padding at small sizes).
+### PyMuPDF Font.glyph_bbox()
+- Returns `Rect` in font units normalized to font size 1.0
+- Actual size = `glyph_bbox.height * font_size_pt`
+- For 'x', height gives exact x-height ratio
+- Also available: `Font.ascender` (max ascender) and `Font.descender` (max descender)
+- These are font-level metrics, not glyph-specific — less precise but always available
+
+### CLP x-height
+- EU Regulation 1272/2008 defines font size as x-height of lowercase letters
+- ECHA guidance confirms: "minimum height of the lower case 'x'"
+- Glyph-based measurement is the closest we can get to the typographic definition
 
 ---
 
-## 📋 Summary
+**Implementation complete. Awaiting test results.**
 
-| Label | Metric | Before (f7fbb4d) | Expected | Fix Applied |
-|-------|--------|-------------------|----------|-------------|
-| 5000ml | Font (x-height) | 1.91mm | 1.78mm | Glyph-based measurement |
-| 5000ml | Gap | 1.92mm | 2.01mm | Will improve via font fix |
-| 700ml | Font | 1.20mm | 1.19mm | Should remain stable |
-| 700ml | Gap | 0.923mm | 0.98mm | No change expected |
+— Opus (Code Implementer)

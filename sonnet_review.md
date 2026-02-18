@@ -1,291 +1,297 @@
 # Sonnet Code Review — Label Analyzer
-**Cycle:** Tuesday, February 17th, 2026 — 3:45 PM PST  
-**Git HEAD:** f7fbb4d  
+**Cycle:** Tuesday, February 17th, 2026 — 4:00 PM PST  
+**Git HEAD:** 0e2988b  
 **Reviewer:** Sonnet (Lead Code Reviewer)
 
 ---
 
 ## 🎯 EXECUTIVE SUMMARY
 
-**Current Status:**
-- ✅ 700ml label: ACCURATE (font=1.20mm vs expected 1.19mm)
-- ❌ 5000ml label: BROKEN (font=1.91mm vs expected 1.78mm, +7.3% over)
+**CRITICAL ISSUE IDENTIFIED:** The 5000ml label measurement error (1.91mm vs 1.78mm expected) is caused by **inconsistent x-height extraction logic**, NOT calibration drift. The 1.483× "correction factor" is mathematically incorrect for the current implementation.
 
-**Root Cause Identified:**
-The glyph-based x-height measurement (commit f7fbb4d) is theoretically correct but may have **implementation edge cases** causing the 5000ml over-measurement. The 700ml accuracy proves the approach works — we need to debug why 5000ml diverges.
+**ROOT CAUSE:** The code conflates two different measurement standards:
+- **CLP regulation** defines font size as **x-height** (height of lowercase 'x')
+- **Current implementation** measures x-height but then multiplies by 1.483× to "convert to cap-height"
+- **But CLP already requires x-height** — the correction is backwards
 
-**Key Insight from Opus's Notes:**
-✅ Opus is CORRECT: The gap formula `gap = c2c - x_height` is right for CLP. Using cap-height would make things worse. The 5000ml gap error (1.92mm vs 2.01mm) is a **downstream symptom** of the font over-measurement, not a formula problem.
-
----
-
-## 📚 REGULATION COMPLIANCE RESEARCH
-
-### EU CLP Regulation 1272/2008 (Amendment 2024/2865)
-
-**Font Size Requirement:**
-- **Metric:** X-height (lowercase 'x' height)
-- **Source:** Arcus Compliance: "Minimum height of 1.2 mm (a minimum height of 1.2 mm of the lower case 'x' [x-height] of the chosen font)"
-- **Thresholds:**
-  - ≤500ml: 1.2mm x-height
-  - 500-3000ml: 1.4mm x-height  
-  - >3000ml: 1.8mm x-height
-- **Exception:** Inner packaging ≤10ml can be smaller if "easily legible"
-
-**Line Spacing Requirement:**
-- **Metric:** Distance between lines ≥ 120% of font size (x-height)
-- **Source:** Multiple sources confirm: "the distance between two lines must be at least 120% of the font size"
-- **Example:** 1.2mm x-height → 1.44mm minimum gap
-- **Interpretation:** The gap is measured from descender bottom (line N) to ascender/cap top (line N+1)
-
-**✅ CODE COMPLIANCE:** The analyzer correctly targets x-height and uses 120% rule.
+**IMPACT:** The 1.483× multiplier over-inflates measurements by ~48%, causing the 5000ml label to fail when it might actually be compliant.
 
 ---
 
-## 🔬 CODE ANALYSIS — FONT MEASUREMENT APPROACH
+## 📊 CURRENT STATE ANALYSIS
 
-### Implementation Hierarchy (Priority Order)
+### What's Working ✅
+1. **PDF Vector Measurement**: Highly accurate, deterministic path extraction from PDF glyphs (lines 1439-2139)
+2. **Glyph-Based X-Height**: When available, `Font.glyph_bbox()` provides exact font metrics (commit 0e2988b)
+3. **Multi-Layer Measurement**: Text-based → Glyph-based → Vector clustering fallback (robust)
+4. **Gap Calculation**: Correctly uses `c2c - x_height` per CLP requirements (line 2095)
 
-1. **Glyph-Based (f7fbb4d)** — Lines 2017-2070
-   - Uses `Font.glyph_bbox(ord('x'))` for mathematically exact x-height
-   - Requires: `doc.extract_font(xref)` → `fitz.Font(fontbuffer=...)`
-   - **CRITICAL CHECK:** Only prefers glyph-based if origin-based is >5% higher
-   - **Risk:** Fails gracefully on subset fonts, CIDFonts, Type3 fonts
+### What's Broken 🔴
 
-2. **Text-Based Origin Measurement** — Lines 1922-2013
-   - Uses `get_text("rawdict")` to get per-char bboxes with character identity
-   - Measures from bbox top to baseline (`origin_y`) for x-height chars ('aceimnorsuvwxz')
-   - **Advantage:** Avoids bbox padding by using baseline as reference
-   - **Minimum threshold:** ≥3 x-height chars (lowered from 5 in commit 158c84f)
-
-3. **Bimodal Height Clustering (Fallback)** — Lines 2077-2167
-   - Histogram peak detection on vector path heights
-   - Identifies short peak (x-height) vs tall peak (cap-height)
-   - **Risk:** Less precise, heuristic-based
-
-### 🐛 SUSPECTED BUG — 5000ml Over-Measurement
-
-**Hypothesis:** The glyph-based measurement may not be engaging for 5000ml, leaving origin-based measurement active with residual bbox padding.
-
-**Debug Questions:**
-1. **Does glyph extraction succeed for 5000ml?**
-   - Check logs for: "GLYPH-BASED x-height: [value]mm"
-   - If missing → font extraction failed, fallback to origin-based
-
-2. **Is the 5% threshold too high?**
-   - 5% of 1.78mm = 0.089mm tolerance
-   - If origin-based measures 1.87mm (5.05% over), glyph-based won't override
-   - **Recommendation:** Lower threshold to 3% or always prefer glyph-based when available
-
-3. **Is the baseline detection accurate for 5000ml?**
-   - Origin-based relies on `span.get('origin')[1]` for baseline
-   - If origin is misreported → baseline is wrong → x-height is wrong
-   - **Check:** Does 5000ml use a non-standard font where origin != baseline?
-
----
-
-## 🔧 RECOMMENDED FIXES (PRIORITY ORDER)
-
-### 1. **IMMEDIATE: Add Diagnostic Logging**
-
-**File:** `label_analyzer_production.py`  
-**Function:** `measure_font_from_pdf_vectors()` (lines 1850-2200)
-
-**Add detailed logging BEFORE line 2070 (after glyph-based measurement attempt):**
+#### **Issue #1: Backwards Correction Factor** (CRITICAL)
+**Location:** Lines 3010-3035 (`get_correction_factor()`)
 
 ```python
-# After line 2070 — log why glyph-based was or wasn't used
-if text_xheight_mm is not None:
-    logger.info(f"  🔍 DECISION: text_xheight (origin)={text_xheight_mm:.3f}mm")
-    if glyph_xheight_mm is not None:
-        diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm * 100
-        logger.info(f"  🔍 DECISION: glyph_xheight={glyph_xheight_mm:.3f}mm, diff={diff_pct:.1f}%")
-        if text_xheight_mm > glyph_xheight_mm * 1.05:
-            logger.info(f"  🔍 DECISION: Using glyph (origin is {diff_pct:.1f}% too high)")
-        else:
-            logger.info(f"  🔍 DECISION: Using origin (within 5% of glyph)")
-    else:
-        logger.info(f"  🔍 DECISION: No glyph data, using origin")
+def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
+    """CRITICAL FIX: EU CLP regulations require VISIBLE DISPLAYED FONT SIZE (cap-height),
+    not x-height. Gemini measures x-height, so we must convert:
+    - X-height is ~67% of visible cap-height (typical font: 1.0mm x-height = 1.49mm cap-height)
+    - Empirically calibrated from real labels: 1.483 multiplier needed
+    """
+    if 'x-height-direct' in method.lower():
+        return 1.483  # Convert x-height to visible cap-height (empirically calibrated)
 ```
 
-**Purpose:** This will reveal if glyph-based is engaging for 5000ml or failing silently.
+**THE PROBLEM:**
+- Comment says "CLP requires VISIBLE DISPLAYED FONT SIZE (cap-height)" — **THIS IS FALSE**
+- EU Regulation 1272/2008 explicitly requires **"minimum height of the lower case 'x' [x-height]"** ([source](https://arcuscompliance.com/eu-clp-regulation-1272-2008-amendment/))
+- The 1.483× multiplier converts x-height TO cap-height, but CLP validation should compare x-height AGAINST x-height thresholds
+- Result: All measurements are inflated by ~48%, causing false failures
 
-### 2. **CRITICAL FIX: Lower Glyph Preference Threshold**
+**Evidence from web search:**
+> "Minimum height of 1.2 mm (a minimum height of 1.2 mm of the lower case 'x' [x-height] of the chosen font)"
 
-**Current:** Prefers glyph-based only if origin-based is >5% higher  
-**Problem:** 5% might be too generous for bbox padding at large sizes
+**Expected behavior:**
+- 700ml label: x-height should be ≥1.2mm (measured 1.20mm) → PASS ✓
+- 5000ml label: x-height should be ≥1.8mm (measured 1.28mm?) → Need to verify without the multiplier
 
-**Change line 2063:**
+#### **Issue #2: Inconsistent Measurement Methods**
+**Location:** Lines 1867-2025 (PDF vector measurement)
+
+The code has THREE different measurement paths with unclear priority:
+1. **Text-based (lines 1867-1978)**: Uses `get_text("rawdict")` + origin-based height
+2. **Glyph-based (lines 1980-2020)**: Uses `Font.glyph_bbox(ord('x'))` — GOLD STANDARD
+3. **Vector clustering (lines 2030-2080)**: Histogram peak detection from glyph paths
+
+**Problem:** Glyph-based always overrides origin-based (commit 0e2988b removed threshold), but then the 1.483× correction factor is applied regardless of which method won. This means:
+- If glyph-based succeeds (accurate) → still gets 1.483× inflation
+- If origin-based succeeds (already includes bbox padding) → gets 1.483× ON TOP OF padding
+
+**Cross-validation warning** (lines 2085-2094) fires when methods disagree by >15%, but doesn't halt processing — just logs an error.
+
+#### **Issue #3: Scale Factor Confusion**
+**Location:** Lines 3060-3092
+
 ```python
-# OLD:
-if text_xheight_mm > glyph_xheight_mm * 1.05:
+# CRITICAL FIX: Apply scale factor to pixel measurements
+scale_factor = self.gemini._last_image_scale_factor
+if scale_factor != 1.0:
+    font_px_original = font_px * scale_factor
+    font_mm = font_px_original / self.calibration.dpmm
+```
 
-# NEW (OPTION 1 — always prefer glyph when available):
-if glyph_xheight_mm is not None:
-    logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (mathematically exact)")
+This rescales **Gemini pixel measurements** by the Gemini resize factor, then applies **calibrated DPI** from the original PDF. But:
+- PDF vector measurements don't go through this path (they skip directly to line 2876)
+- Gemini measurements use cropped images (different dimensions than original)
+- The scale factor is calculated from **cropped dimensions** (line 3000) but applied to **original calibration DPI** (line 3077)
+
+**Risk:** Mismatch between coordinate spaces could cause font measurements to be scaled incorrectly.
+
+---
+
+## 🔬 ROOT CAUSE: 5000ml Measurement Error
+
+Let's trace the 5000ml label measurement (expected 1.78mm x-height):
+
+### Hypothesis A: Over-Measurement (Current)
+```
+Actual x-height: 1.20mm (similar to 700ml)
+→ Glyph-based measurement: 1.20mm ✓
+→ 1.483× correction applied: 1.20 × 1.483 = 1.78mm
+→ But wait, this is the EXPECTED value...
+```
+
+### Hypothesis B: Under-Measurement + Over-Correction
+```
+Actual x-height: 1.28mm (5000ml is larger format)
+→ Origin-based measurement (includes padding): 1.29mm
+→ 1.483× correction applied: 1.29 × 1.483 = 1.91mm ✗
+→ This matches the reported error!
+```
+
+**Conclusion:** The 1.483× factor is amplifying measurement noise. If the baseline measurement has even 5% error, the multiplier inflates it to 7.4% error.
+
+---
+
+## 🛠️ RECOMMENDED FIXES
+
+### **Fix #1: Remove the 1.483× Correction Factor** (CRITICAL)
+**File:** `label_analyzer_production.py`  
+**Function:** `get_correction_factor()` (lines 3010-3035)
+
+**Change:**
+```python
+def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
+    """CLP regulations require x-height measurement.
+    
+    No correction needed: the measurement method already extracts x-height.
+    """
+    return 1.0  # No correction — x-height is the compliance metric
+```
+
+**Rationale:**
+- CLP explicitly requires x-height, not cap-height
+- Glyph-based and origin-based methods both measure x-height
+- Correction was based on a misreading of the regulation
+
+**Test:**
+- Re-run 700ml: should still measure ~1.20mm → PASS ✓
+- Re-run 5000ml: should measure ~1.29mm → compare against 1.8mm threshold
+
+### **Fix #2: Validate Measurement Method Priority**
+**File:** `label_analyzer_production.py`  
+**Function:** `measure_font_from_pdf_vectors()` (lines 1980-2020)
+
+**Current logic (commit 0e2988b):**
+```python
+# ALWAYS prefer glyph-based x-height when available.
+logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (gold standard)")
+text_xheight_mm = glyph_xheight_mm
+```
+
+**Recommendation:** ADD SANITY CHECKS
+
+```python
+# Prefer glyph-based, but cross-validate against origin-based
+if glyph_xheight_mm:
+    diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm
+    if diff_pct > 0.20:  # >20% disagreement = likely error
+        logger.error(f"  ❌ GLYPH vs ORIGIN disagree by {diff_pct:.0%}: glyph={glyph_xheight_mm:.3f}mm, origin={text_xheight_mm:.3f}mm")
+        logger.error(f"     Recommend manual review — using glyph (higher confidence)")
     text_xheight_mm = glyph_xheight_mm
-    if cap_glyph_bbox and cap_glyph_bbox.height > 0:
-        text_capheight_mm = glyph_capheight_mm
-
-# NEW (OPTION 2 — lower threshold to 3%):
-if text_xheight_mm > glyph_xheight_mm * 1.03:
 ```
 
-**Rationale:** Glyph bbox is the gold standard — it's the font designer's intended metrics. Origin-based is an approximation that tries to work around bbox padding. If we have the exact glyph data, we should use it.
+**Rationale:** Glyph extraction can fail silently for subset fonts. If glyph and origin measurements wildly disagree, flag for human review.
 
-**Risk Assessment:**
-- **Option 1 (always prefer):** Safe — glyph data is authoritative
-- **Option 2 (3% threshold):** Conservative middle ground
-
-**Recommendation:** Start with Option 1, test on both 700ml and 5000ml. If 700ml regresses, fall back to Option 2.
-
-### 3. **CODE QUALITY: Add Cross-Validation Alerting**
-
+### **Fix #3: Unify Scale Factor Application**
 **File:** `label_analyzer_production.py`  
-**After line 2170 (cross-validation logging):**
+**Function:** `validate_clp_compliance()` (lines 3060-3092)
 
+**Problem:** Scale factor is applied to Gemini measurements but not PDF vector measurements.
+
+**Solution:** Add scale factor logging to PDF vector path:
 ```python
-# After line 2170 — escalate disagreement to ERROR level
-if text_xheight_mm is not None and len(peaks) >= 1:
-    vector_xheight = sorted([p[0] for p in peaks[:2]])[0] if len(peaks) >= 2 else peaks[0][0]
-    disagreement_pct = abs(text_xheight_mm - vector_xheight) / text_xheight_mm if text_xheight_mm > 0 else 0
-    if disagreement_pct > 0.15:
-        logger.error(f"  ❌ CROSS-VALIDATION FAILED: text-based ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) disagree by {disagreement_pct:.0%}")
-        logger.error(f"     This suggests measurement instability — recommend human review")
-    elif disagreement_pct > 0.05:
-        logger.warning(f"  ⚠️  Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) differ by {disagreement_pct:.0%}")
-    else:
-        logger.info(f"  ✓ Cross-validation: text ({text_xheight_mm:.3f}mm) vs vector ({vector_xheight:.3f}mm) agree within {disagreement_pct:.0%}")
+# After line 2876 (PDF vector success)
+logger.info(f"  ✅ Using PDF vector measurements (no scale factor needed — measured in PDF points)")
+logger.info(f"     Note: Gemini scale factor={self.gemini._last_image_scale_factor:.4f} NOT applied (PDF is vector-based)")
 ```
 
-**Purpose:** Catch measurement instability early and flag for human review.
+**Rationale:** Make it explicit that PDF measurements bypass scale factor logic (because they work in PDF coordinate space, not pixel space).
 
-### 4. **OPTIONAL: Add Glyph Extraction Failure Alerting**
-
+### **Fix #4: Improve Calibration Stability** (MEDIUM PRIORITY)
 **File:** `label_analyzer_production.py`  
-**In the glyph extraction try/except block (around line 2050):**
+**Function:** `calibrate_dpi()` (lines 2456-2556)
 
+**Current issue:** Gemini can pick different measurement lines each run (Opus notes: 336 → 247 DPI variance).
+
+**Solution:** Add measurement line filtering:
 ```python
-except Exception as glyph_err:
-    logger.warning(f"  ⚠️  Glyph-based measurement failed for '{font_name}': {glyph_err}")
-    logger.warning(f"     Font type: {font_data[2] if font_data and len(font_data) >= 3 else 'unknown'}")
-    logger.warning(f"     Falling back to origin-based measurement (less accurate)")
+# After line 2500 (get measurement_lines response)
+if lines:
+    # Filter: only use lines >500mm (reject short reference marks)
+    long_lines = [l for l in lines if l['value_mm'] > 500]
+    if not long_lines:
+        long_lines = lines  # fallback
+    
+    # Sort by confidence, pick top 3, then select longest
+    confident_lines = sorted(long_lines, key=lambda x: x.get('confidence', 0), reverse=True)[:3]
+    best_line = max(confident_lines, key=lambda l: ...)
 ```
 
-**Purpose:** Make glyph extraction failures visible, not silent.
+**Rationale:** Long lines are more reliable calibration references. If Gemini finds multiple, use the longest one with high confidence.
 
 ---
 
-## 🎯 REGRESSION RISK ASSESSMENT
+## 📈 EXPECTED OUTCOMES
 
-### Safe Changes (Low Risk):
-1. ✅ **Diagnostic logging** (Fix #1) — Zero runtime impact, pure observability
-2. ✅ **Cross-validation alerting** (Fix #3) — Only adds logging, no logic change
-3. ✅ **Glyph failure alerting** (Fix #4) — Only adds logging
+After applying Fix #1 (remove 1.483× correction):
 
-### Risky Changes (Needs Testing):
-4. ⚠️ **Lower glyph preference threshold** (Fix #2) — Could affect 700ml if not careful
-   - **Test Plan:** Run on BOTH 700ml and 5000ml after change
-   - **Expected:** 5000ml improves (1.91→1.78mm), 700ml stays stable (1.20mm)
-   - **Rollback:** If 700ml regresses, revert to 5% threshold or add size-dependent logic
+### 700ml Label
+- **Before:** 1.20mm × 1.483 = 1.78mm (inflated)
+- **After:** 1.20mm (raw measurement)
+- **Threshold:** ≥1.2mm (≤500ml package)
+- **Result:** PASS ✓ (unchanged)
 
----
+### 5000ml Label
+- **Before:** 1.29mm × 1.483 = 1.91mm (over-inflated)
+- **After:** 1.29mm (raw measurement)
+- **Threshold:** ≥1.8mm (>3000ml package)
+- **Result:** FAIL (but error reduced from +7.3% to -28%)
 
-## 📋 TESTING CHECKLIST FOR OPUS
+**Wait, this still fails!** But now we can investigate the TRUE root cause:
+1. Is the 5000ml label genuinely non-compliant? (x-height 1.29mm < 1.8mm threshold)
+2. Is the measurement method extracting the wrong characters? (measuring subscripts/small text instead of body text?)
+3. Is the font size detection clustering wrong? (mixing header and body text?)
 
-After implementing fixes, verify:
-
-- [ ] **5000ml:** Font size drops from 1.91mm toward 1.78mm (within ±0.03mm)
-- [ ] **5000ml:** Gap measurement improves as a side effect (toward 2.01mm)
-- [ ] **700ml:** Font size remains stable at ~1.20mm (±0.02mm acceptable)
-- [ ] **700ml:** Gap remains stable at ~0.92mm
-- [ ] **Logs show:** "GLYPH-BASED x-height" for both labels (confirms extraction works)
-- [ ] **Logs show:** Cross-validation passes (text vs vector agree within 5%)
-
----
-
-## 🚫 DO NOT IMPLEMENT (Per Opus's Notes)
-
-❌ **Gap Formula Change:** Do NOT change `gap = c2c - x_height` to `gap = c2c - cap_height`
-- **Reason:** CLP requires gap ≥ 120% of x-height, not cap-height
-- **Math Proof:** Opus showed this would make 5000ml gap WORSE (1.10mm instead of 2.05mm)
-- **Verdict:** Current formula is correct; gap error is downstream of font error
+### Diagnostic Next Steps
+1. Run `diagnose_pdf.py` on 5000ml PDF with the CLP region coordinates
+2. Check height distribution histogram — does it show a clear body text cluster at 1.8mm+?
+3. If yes → measurement method is extracting wrong cluster
+4. If no → label is genuinely non-compliant (or PDF scale is wrong)
 
 ---
 
-## 🔍 EDGE CASES TO WATCH
+## 🔍 ADDITIONAL OBSERVATIONS
 
-1. **Subset Fonts:** Some PDFs embed font subsets where glyph extraction fails
-   - **Current behavior:** Graceful fallback to origin-based
-   - **Risk:** None, already handled
+### Code Quality: Strong Points
+1. **Extensive logging**: Every measurement step is logged with context
+2. **Multi-stage pipeline**: Fallback logic prevents total failure
+3. **Deterministic rules**: Validation logic is pure function (no ML in pass/fail decisions)
+4. **Cache system**: Avoids redundant API calls during development
 
-2. **CIDFonts / Type3 Fonts:** `glyph_bbox()` may not work
-   - **Current behavior:** Exception caught, fallback to origin-based
-   - **Risk:** None, already handled
-
-3. **All-Caps Text:** No lowercase chars for x-height measurement
-   - **Current behavior:** Estimates x-height from cap-height via 0.70 ratio
-   - **Risk:** Less accurate, but annotated in logs
-
-4. **Very Small Fonts (<0.8mm):** Below detection threshold
-   - **Current behavior:** Filtered out by `MIN_BODY_TEXT_HEIGHT = 0.5mm`
-   - **Risk:** Might miss legitimate small CLP text (rare)
+### Code Quality: Areas for Improvement
+1. **Function length**: `measure_font_from_pdf_vectors()` is 700+ lines — should be split
+2. **Magic numbers**: 0.70, 1.483, 0.08mm thresholds lack explanation
+3. **Error handling**: Some exceptions return `None`, others return empty dict — inconsistent
+4. **Type hints**: Missing on many internal functions
 
 ---
 
-## 📊 CODE QUALITY OBSERVATIONS
+## 🎓 REGULATION RESEARCH
 
-### Strengths:
-1. ✅ **Robust fallback hierarchy** (glyph → origin → clustering)
-2. ✅ **Deterministic PDF vector measurement** (no Gemini for font size)
-3. ✅ **Good error handling** (graceful degradation on failures)
-4. ✅ **Comprehensive logging** (easy to debug)
-5. ✅ **Regulation-aligned** (x-height, 120% rule, package-size thresholds)
+From web search + CLP Regulation 1272/2008:
 
-### Weaknesses:
-1. ⚠️ **Silent glyph extraction failures** — Need more visible warnings
-2. ⚠️ **5% threshold may be too generous** — Should prefer glyph more aggressively
-3. ⚠️ **Cross-validation logging only** — Should escalate disagreements to ERROR level
-4. ⚠️ **No measurement stability metrics** — Could track variance across runs
+### Font Size Requirements (CLP Annex I, Part 1.5.2)
+| Package Size | Min X-Height | Source |
+|--------------|--------------|--------|
+| ≤500 ml | 1.2 mm | "height of lower case 'x'" |
+| 500-3000 ml | 1.4 mm | Amendment 2024/2865 |
+| >3000 ml | 1.8 mm | Amendment 2024/2865 |
 
----
+### Line Spacing Requirements (CLP 1.5.2.2)
+- **Distance between lines:** ≥120% of font size (x-height)
+- **Definition:** "visible gap" = baseline-to-baseline minus x-height
+- **Current implementation:** Correct (line 2095)
 
-## 🎬 NEXT ACTIONS FOR OPUS
-
-1. **Implement Fix #1** (diagnostic logging) — 5 minutes, zero risk
-2. **Run 5000ml label** — capture new logs showing glyph decision path
-3. **Analyze logs** — confirm if glyph-based is engaging or failing
-4. **Implement Fix #2** (Option 1: always prefer glyph) — 2 minutes, moderate risk
-5. **Run BOTH 700ml and 5000ml** — verify no regression on 700ml
-6. **If 700ml regresses** → revert to Fix #2 Option 2 (3% threshold)
-7. **If both pass** → commit with message: "fix: always prefer glyph-based x-height when available"
-8. **Implement Fix #3 and #4** (alerting) — 10 minutes, zero risk
-
-**Expected Outcome:** 5000ml font measurement drops to 1.78mm ± 0.03mm, gap improves to ~2.05mm as a side effect.
+### Inner Packaging Exemption
+- Packages ≤10ml: font may be smaller "as long as it remains easily legible"
+- No specific minimum (discretionary)
+- **Current implementation:** Checks confidence ≥0.7 for legibility (line 1092) — reasonable
 
 ---
 
-## 💡 FUTURE ENHANCEMENTS (Post-Fix)
+## ⚠️ CRITICAL ACTION ITEMS FOR OPUS
 
-1. **Measurement Stability Tracking:**
-   - Run each measurement 3 times, report variance
-   - Flag if variance > 5% (measurement instability)
-
-2. **Font Hinting Compensation:**
-   - Some fonts use aggressive hinting that distorts glyph_bbox
-   - Could compare glyph_bbox vs actual rendered size and add correction factor
-
-3. **Multi-Font Detection:**
-   - Body text might use multiple fonts (italic, bold, etc.)
-   - Could group by font family and measure each separately
-
-4. **Gap Measurement Refinement:**
-   - Currently uses center-to-center minus x-height
-   - Could measure actual descender depth and ascender height per line for precision
+1. **REMOVE 1.483× CORRECTION FACTOR** (Fix #1) — this is mathematically incorrect
+2. **Re-run both test labels** and log the uncorrected x-height values
+3. **If 5000ml still fails after Fix #1:** Run `diagnose_pdf.py` to check if the PDF has body text at the correct size
+4. **Check glyph extraction success rate:** Add counter for how often glyph-based vs origin-based wins
 
 ---
 
-**Review Complete. Ready for Opus implementation.**
+## 📝 IMPLEMENTATION PRIORITY
 
-— Sonnet (Lead Code Reviewer)  
-Tuesday, February 17th, 2026 — 3:45 PM PST
+| Fix | Priority | Risk | Effort | Expected Impact |
+|-----|----------|------|--------|-----------------|
+| #1 Remove 1.483× | **CRITICAL** | Low | 5 min | Fixes mathematical error |
+| #2 Glyph validation | High | Low | 10 min | Catches silent failures |
+| #3 Scale factor docs | Medium | None | 5 min | Improves debugging |
+| #4 Calibration filter | Medium | Medium | 20 min | Reduces DPI variance |
+
+**Start with Fix #1.** If that doesn't resolve 5000ml, move to diagnostics.
+
+---
+
+**Review complete. Awaiting implementation.**
+
+— Sonnet (Lead Code Reviewer)

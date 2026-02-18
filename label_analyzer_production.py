@@ -1908,10 +1908,10 @@ If no clear number is visible, return 0."""
                                         diff_pct = abs(text_xheight_mm - glyph_xheight_mm) / glyph_xheight_mm * 100 if glyph_xheight_mm > 0 else 0
                                         logger.info(f"  📐 Origin vs Glyph x-height difference: {diff_pct:.1f}% (origin={text_xheight_mm:.3f}mm, glyph={glyph_xheight_mm:.3f}mm)")
                                         
-                                        # ALWAYS prefer glyph-based x-height when available.
-                                        # Glyph bbox is the font designer's intended metrics — the gold standard.
-                                        # Origin-based is an approximation that suffers from bbox padding.
-                                        # Previous threshold (5%) was too generous and let over-measurements through.
+                                        # Prefer glyph-based, but cross-validate against origin-based
+                                        if diff_pct > 20:
+                                            logger.error(f"  ❌ GLYPH vs ORIGIN disagree by {diff_pct:.1f}%: glyph={glyph_xheight_mm:.3f}mm, origin={text_xheight_mm:.3f}mm")
+                                            logger.error(f"     Possible subset font issue — using glyph (higher confidence) but flagging for review")
                                         logger.info(f"  📐 ⚡ Preferring GLYPH-BASED x-height (gold standard, origin diff={diff_pct:.1f}%)")
                                         text_xheight_mm = glyph_xheight_mm
                                         if cap_glyph_bbox and cap_glyph_bbox.height > 0:
@@ -2654,8 +2654,8 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
                 line_dist_mm = measurements['line_distance_mm']
                 meas_conf = measurements['measurement_confidence']
                 
-                logger.info(f"  ✓ PDF Vector measurements:")
-                logger.info(f"    Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm")
+                logger.info(f"  ✓ PDF Vector measurements (no correction factor — x-height is CLP metric):")
+                logger.info(f"    Font (x-height)={font_mm:.2f}mm, Line gap={line_dist_mm:.2f}mm")
                 logger.info(f"    BG={measurements['background_color']}, Contrast={measurements['contrast_assessment']}")
                 
                 # Skip all the Gemini font measurement, scale factor, correction factor logic
@@ -2724,24 +2724,19 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             # This is empirically calibrated: vision models tend to measure ~2-3% high.
             
             def get_correction_factor(confidence: float, method: str = 'x-height-direct') -> float:
-                """Dynamic correction based on measurement method and confidence.
+                """CLP compliance correction factor.
                 
-                CRITICAL FIX: EU CLP regulations require VISIBLE DISPLAYED FONT SIZE (cap-height),
-                not x-height. Gemini measures x-height, so we must convert:
-                - X-height is ~67% of visible cap-height (typical font: 1.0mm x-height = 1.49mm cap-height)
-                - Empirically calibrated from real labels: 1.483 multiplier needed
+                EU Regulation 1272/2008 (CLP) defines font size as x-height
+                (height of lowercase 'x'). No conversion to cap-height is needed.
                 
-                Logic:
-                - If x-height-direct: apply 1.483x to convert x-height to visible cap-height
-                - If cap-height-estimated: apply 1.0x (already cap-height from Gemini)
-                - Confidence just affects precision, not the direction of conversion
+                Previous code applied 1.483× to convert x-height → cap-height,
+                but this was INCORRECT: CLP thresholds (1.2mm, 1.4mm, 1.8mm)
+                are already x-height thresholds, not cap-height thresholds.
+                
+                Removed 2026-02-17: was inflating measurements by ~48%.
                 """
-                if 'x-height-direct' in method.lower():
-                    return 1.483  # Convert x-height to visible cap-height (empirically calibrated)
-                elif 'cap-height' in method.lower():
-                    return 1.0   # Already cap-height, no conversion needed
-                else:
-                    return 1.0   # Default: no correction
+                # No correction needed — x-height IS the compliance metric
+                return 1.0
             
             # Safely extract measurements with numeric coercion
             # NOTE: Correction factor is applied AFTER scale factor (below),
@@ -2760,9 +2755,9 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             except (ValueError, TypeError):
                 font_px = 0
             
-            # Calculate what cap-height would be (for debugging)
-            # Cap-height is typically 1.48-1.5x x-height
-            estimated_cap_height_mm = font_mm_raw * 1.483 if font_mm_raw > 0 else 0
+            # Calculate what cap-height would be (for debugging only — NOT used for compliance)
+            # Cap-height is typically 1.43x x-height (1/0.70)
+            estimated_cap_height_mm = font_mm_raw / 0.70 if font_mm_raw > 0 else 0
                 
             try:
                 line_dist_mm = float(measurements.get('line_distance_mm') or 0)
@@ -2854,7 +2849,7 @@ Report ONLY colors and contrast. Do NOT measure font sizes."""
             logger.info(f"    [CROP] {cropped_w}×{cropped_h}px")
             logger.info(f"    [MEASUREMENT] Font: {font_px:.1f}px (raw: {font_mm_raw:.4f}mm) → corrected: {font_mm:.4f}mm (method: {measurement_method})")
             logger.info(f"    [MEASUREMENT] Line: {line_dist_px:.1f}px → {line_dist_mm:.4f}mm")
-            logger.info(f"    [CAP-HEIGHT DEBUG] Raw={font_mm_raw:.4f}mm, Estimated Cap-Height (raw×1.483)={estimated_cap_height_mm:.4f}mm, Final={font_mm:.4f}mm")
+            logger.info(f"    [CAP-HEIGHT DEBUG] Raw x-height={font_mm_raw:.4f}mm, Est. Cap-Height (raw/0.70)={estimated_cap_height_mm:.4f}mm, Final={font_mm:.4f}mm")
             logger.info(f"    [CONFIDENCE] measurement={meas_conf_raw:.0%}, x-height correction applied={meas_conf_raw >= 0.7}")
             
             logger.info(f"    [SUMMARY] Font={font_mm:.2f}mm, Line={line_dist_mm:.2f}mm, BG={measurements.get('background_color', '?')}, Contrast={measurements.get('contrast_assessment', '?')}")
