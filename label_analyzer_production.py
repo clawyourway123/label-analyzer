@@ -1658,6 +1658,7 @@ class LabelAnalyzer:
         
         # Take top 3 unique-length lines of each orientation
         def unique_by_length(lines, tol=5):
+            """Filter lines by unique length (tolerance: tol mm)."""
             seen = []
             result = []
             for line in lines:
