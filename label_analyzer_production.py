@@ -1365,7 +1365,7 @@ class GeminiClient:
         self._last_image_height: int = 0
         self._last_image_scale_factor: float = 1.0  # Scale factor for Gemini's internal resizing
     
-    def _get_client(self):
+    def _get_client(self) -> 'genai.Client':
         """Lazy-load Gemini client"""
         if self._client is None:
             try:
@@ -2059,7 +2059,7 @@ If no clear number is visible, return 0."""
                             region_paths.append({
                                 'rect': r, 'w': w, 'h': h,
                                 'y_top': r[1], 'y_bot': r[3],
-                                x : r[0], 'x_end': r[2],
+                                'x': r[0], 'x_end': r[2],
                                 'y_center': (r[1] + r[3]) / 2,
                                 'stroke_w': stroke_w
                             })
